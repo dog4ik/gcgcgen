@@ -1,0 +1,13 @@
+[package]
+name = "connect"
+version = "0.1.0"
+edition = "2021"
+description = "The reactivepay-facing gateway-connect contract: request envelope, response envelope, canonical status vocabulary and interaction log."
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+time = { version = "0.3.55", features = ["serde-human-readable"] }
+
+[dev-dependencies]
+serde_json = { version = "1.0.151", features = ["preserve_order"] }

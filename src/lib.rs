@@ -1,4 +1,17 @@
+#![recursion_limit = "512"]
+#[cfg(feature = "ssr")]
+pub mod api;
 pub mod app;
+#[cfg(feature = "ssr")]
+pub mod db;
+#[cfg(feature = "ssr")]
+pub mod engine;
+pub mod model;
+pub mod server_fns;
+pub mod spec;
+#[cfg(feature = "ssr")]
+pub mod state;
+pub mod ui;
 
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]

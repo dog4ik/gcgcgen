@@ -1,0 +1,440 @@
+//! Building and sending one outbound request.
+//!
+//! Rendering and sending are separate so that a signature can be computed over
+//! the finished request, and so a dry run can render without any network.
+
+use std::time::Duration;
+
+use serde_json::{Map, Value};
+
+use super::error::{EngineError, Result};
+use crate::spec::{Body, HttpMethod, RequestDef};
+
+/// A fully rendered request, ready to sign and send.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prepared {
+    pub method: HttpMethod,
+    /// Path portion, as authored (used by signature canonical strings).
+    pub path: String,
+    pub base_url: String,
+    pub query: Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
+    pub body: PreparedBody,
+    pub timeout: Option<Duration>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreparedBody {
+    None,
+    Json(Value),
+    Form(Vec<(String, String)>),
+    Raw { content_type: String, text: String },
+}
+
+impl Prepared {
+    /// URL without the query string.
+    pub fn url(&self) -> String {
+        format!("{}{}", self.base_url, self.path)
+    }
+
+    /// URL including the query string, as it will be requested and logged.
+    pub fn full_url(&self) -> String {
+        if self.query.is_empty() {
+            return self.url();
+        }
+        let qs: Vec<String> = self
+            .query
+            .iter()
+            .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+            .collect();
+        format!("{}?{}", self.url(), qs.join("&"))
+    }
+
+    /// The serialized body, for signing and for `req.body_raw`.
+    pub fn body_raw(&self) -> String {
+        match &self.body {
+            PreparedBody::None => String::new(),
+            PreparedBody::Json(v) => serde_json::to_string(v).unwrap_or_default(),
+            PreparedBody::Form(fields) => fields
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+                .collect::<Vec<_>>()
+                .join("&"),
+            PreparedBody::Raw { text, .. } => text.clone(),
+        }
+    }
+
+    pub fn body_value(&self) -> Value {
+        match &self.body {
+            PreparedBody::None => Value::Null,
+            PreparedBody::Json(v) => v.clone(),
+            PreparedBody::Form(fields) => Value::Object(
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect(),
+            ),
+            PreparedBody::Raw { text, .. } => Value::String(text.clone()),
+        }
+    }
+
+    /// What lands in the interaction log's `request.params`.
+    pub fn log_params(&self) -> Value {
+        let mut m = Map::new();
+        m.insert(
+            "method".into(),
+            Value::String(self.method.as_str().to_string()),
+        );
+        if !self.headers.is_empty() {
+            m.insert("headers".into(), pairs(&self.headers));
+        }
+        if !self.query.is_empty() {
+            m.insert("query".into(), pairs(&self.query));
+        }
+        if !matches!(self.body, PreparedBody::None) {
+            m.insert("body".into(), self.body_value());
+        }
+        Value::Object(m)
+    }
+
+    /// The `req` root a signature's canonical string reads.
+    pub fn req_scope(&self) -> Value {
+        let mut m = Map::new();
+        m.insert(
+            "method".into(),
+            Value::String(self.method.as_str().to_string()),
+        );
+        m.insert("path".into(), Value::String(self.path.clone()));
+        m.insert("url".into(), Value::String(self.full_url()));
+        m.insert("query".into(), pairs(&self.query));
+        m.insert("headers".into(), pairs(&self.headers));
+        m.insert("body".into(), self.body_value());
+        m.insert("body_raw".into(), Value::String(self.body_raw()));
+        Value::Object(m)
+    }
+
+    pub fn set_header(&mut self, name: &str, value: String) {
+        match self
+            .headers
+            .iter_mut()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        {
+            Some(slot) => slot.1 = value,
+            None => self.headers.push((name.to_string(), value)),
+        }
+    }
+
+    pub fn set_query(&mut self, name: &str, value: String) {
+        match self.query.iter_mut().find(|(n, _)| n == name) {
+            Some(slot) => slot.1 = value,
+            None => self.query.push((name.to_string(), value)),
+        }
+    }
+
+    /// Writes a value into the JSON body at a dotted path, creating objects on
+    /// the way down. Used by `SigPlacement::BodyField`.
+    pub fn set_body_field(&mut self, path: &str, value: Value) -> Result<()> {
+        let PreparedBody::Json(root) = &mut self.body else {
+            return Err(EngineError::Config(
+                "signature placement `body_field` requires a JSON body".into(),
+            ));
+        };
+        if !root.is_object() {
+            *root = Value::Object(Map::new());
+        }
+        let mut cur = root;
+        let mut segs = path.split('.').peekable();
+        while let Some(seg) = segs.next() {
+            if segs.peek().is_none() {
+                cur.as_object_mut()
+                    .expect("ensured to be an object below")
+                    .insert(seg.to_string(), value);
+                return Ok(());
+            }
+            let obj = cur.as_object_mut().expect("ensured to be an object below");
+            let next = obj
+                .entry(seg.to_string())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if !next.is_object() {
+                *next = Value::Object(Map::new());
+            }
+            cur = next;
+        }
+        Err(EngineError::Config(
+            "signature body path must not be empty".into(),
+        ))
+    }
+}
+
+fn pairs(items: &[(String, String)]) -> Value {
+    Value::Object(
+        items
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect(),
+    )
+}
+
+/// Percent-encoding for query strings and form bodies (RFC 3986 unreserved).
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Renders a request definition against a scope.
+pub fn prepare(req: &RequestDef, base_url: &str, scope: &Value) -> Result<Prepared> {
+    let path = req.path.render_string(scope)?.ok_or_else(|| {
+        EngineError::Config(format!("request `{}`: path rendered empty", req.name))
+    })?;
+
+    let mut headers = Vec::new();
+    for h in &req.headers {
+        if let Some(v) = h.value.render_string(scope)? {
+            headers.push((h.name.clone(), v));
+        }
+    }
+
+    let mut query = Vec::new();
+    for q in &req.query {
+        if let Some(v) = q.value.render_string(scope)? {
+            query.push((q.name.clone(), v));
+        }
+    }
+
+    let body = match &req.body {
+        Body::None => PreparedBody::None,
+        Body::Json { template } => PreparedBody::Json(template.render(scope)?),
+        Body::Form { fields } => {
+            let mut out = Vec::new();
+            for f in fields {
+                if let Some(v) = f.value.render_string(scope)? {
+                    out.push((f.name.clone(), v));
+                }
+            }
+            PreparedBody::Form(out)
+        }
+        Body::Raw { content_type, text } => PreparedBody::Raw {
+            content_type: content_type.clone(),
+            text: text.render_string(scope)?.unwrap_or_default(),
+        },
+    };
+
+    Ok(Prepared {
+        method: req.method,
+        path,
+        base_url: base_url.trim_end_matches('/').to_string(),
+        query,
+        headers,
+        body,
+        timeout: req.timeout_ms.map(Duration::from_millis),
+    })
+}
+
+/// What came back. The body is always captured, even when it is not JSON, so
+/// the interaction log never loses an error page.
+#[derive(Debug, Clone)]
+pub struct RawResponse {
+    pub status: u16,
+    pub headers: Value,
+    pub body: Value,
+}
+
+impl RawResponse {
+    /// The `resp` root a response spec reads.
+    pub fn to_scope(&self) -> Value {
+        let mut m = Map::new();
+        m.insert("status".into(), Value::Number(self.status.into()));
+        m.insert("headers".into(), self.headers.clone());
+        m.insert("body".into(), self.body.clone());
+        m.insert("ok".into(), Value::Bool((200..300).contains(&self.status)));
+        Value::Object(m)
+    }
+}
+
+pub async fn send(client: &reqwest::Client, prepared: &Prepared) -> Result<RawResponse> {
+    let method = reqwest::Method::from_bytes(prepared.method.as_str().as_bytes())
+        .map_err(|e| EngineError::Config(format!("bad HTTP method: {e}")))?;
+
+    let mut builder = client.request(method, prepared.full_url());
+    for (name, value) in &prepared.headers {
+        builder = builder.header(name, value);
+    }
+    match &prepared.body {
+        PreparedBody::None => {}
+        PreparedBody::Json(v) => builder = builder.json(v),
+        PreparedBody::Form(fields) => {
+            builder = builder
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(prepared.body_raw());
+            let _ = fields;
+        }
+        PreparedBody::Raw { content_type, text } => {
+            builder = builder
+                .header("content-type", content_type)
+                .body(text.clone())
+        }
+    }
+    if let Some(t) = prepared.timeout {
+        builder = builder.timeout(t);
+    }
+
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| EngineError::Transport(e.to_string()))?;
+    let status = resp.status().as_u16();
+
+    let headers = Value::Object(
+        resp.headers()
+            .iter()
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v| (k.as_str().to_string(), Value::String(v.to_string())))
+            })
+            .collect(),
+    );
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| EngineError::Transport(e.to_string()))?;
+    // A non-JSON body is kept verbatim as a string rather than discarded, so
+    // an HTML error page still reaches the interaction log.
+    let body = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+
+    Ok(RawResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn req(src: &str) -> RequestDef {
+        serde_json::from_str(src).unwrap()
+    }
+
+    fn scope() -> Value {
+        json!({
+            "payment": {"token": "tok 1", "gateway_amount": 1000},
+            "settings": {"wallet": "w1", "key": "k"},
+            "params": {}, "steps": {}, "env": {}, "method": {"kind": "pay"}
+        })
+    }
+
+    #[test]
+    fn renders_path_headers_query_and_json_body() {
+        let r = req(r#"{
+            "name": "c", "method": "post", "path": "/v1/pay/{{ payment.token }}",
+            "headers": [{"name": "X-Key", "value": "{{ settings.key }}"},
+                        {"name": "X-Skip", "value": "{{? payment.nope }}"}],
+            "query":   [{"name": "w", "value": "{{ settings.wallet }}"}],
+            "body": {"kind": "json", "template": {
+                "amount": "{{ payment.gateway_amount | minor_to_major }}",
+                "drop": "{{? payment.nope }}" }}
+        }"#);
+        let p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+
+        assert_eq!(p.path, "/v1/pay/tok 1");
+        // The omit-marked header is gone, not empty.
+        assert_eq!(p.headers, vec![("X-Key".to_string(), "k".to_string())]);
+        assert_eq!(p.body, PreparedBody::Json(json!({"amount": 10})));
+        assert_eq!(p.full_url(), "https://api.example.com/v1/pay/tok 1?w=w1");
+        assert_eq!(p.body_raw(), r#"{"amount":10}"#);
+    }
+
+    #[test]
+    fn form_bodies_are_urlencoded() {
+        let r = req(r#"{"name":"c","path":"/f","body":{"kind":"form","fields":[
+            {"name":"a","value":"x y"},{"name":"b","value":"{{ settings.wallet }}"}]}}"#);
+        let p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        assert_eq!(p.body_raw(), "a=x+y&b=w1");
+        assert_eq!(p.body_value(), json!({"a": "x y", "b": "w1"}));
+    }
+
+    #[test]
+    fn log_params_capture_the_whole_request() {
+        let r = req(
+            r#"{"name":"c","path":"/p","headers":[{"name":"H","value":"v"}],
+                        "body":{"kind":"json","template":{"a":1}}}"#,
+        );
+        let p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        assert_eq!(
+            p.log_params(),
+            json!({"method": "POST", "headers": {"H": "v"}, "body": {"a": 1}})
+        );
+    }
+
+    #[test]
+    fn req_scope_exposes_the_signable_surface() {
+        let r = req(
+            r#"{"name":"c","path":"/p","query":[{"name":"q","value":"1"}],
+                        "body":{"kind":"json","template":{"a":1}}}"#,
+        );
+        let p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        let s = p.req_scope();
+        assert_eq!(s["method"], json!("POST"));
+        assert_eq!(s["path"], json!("/p"));
+        assert_eq!(s["url"], json!("https://api.example.com/p?q=1"));
+        assert_eq!(s["body_raw"], json!(r#"{"a":1}"#));
+    }
+
+    #[test]
+    fn set_body_field_creates_nested_objects() {
+        let r = req(r#"{"name":"c","path":"/p","body":{"kind":"json","template":{"a":1}}}"#);
+        let mut p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        p.set_body_field("auth.signature", json!("deadbeef"))
+            .unwrap();
+        assert_eq!(
+            p.body_value(),
+            json!({"a": 1, "auth": {"signature": "deadbeef"}})
+        );
+    }
+
+    #[test]
+    fn set_body_field_rejects_a_non_json_body() {
+        let r = req(r#"{"name":"c","path":"/p"}"#);
+        let mut p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        assert!(p.set_body_field("sig", json!("x")).is_err());
+    }
+
+    #[test]
+    fn setting_a_header_is_case_insensitive() {
+        let r =
+            req(r#"{"name":"c","path":"/p","headers":[{"name":"Authorization","value":"old"}]}"#);
+        let mut p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        p.set_header("authorization", "new".into());
+        assert_eq!(
+            p.headers,
+            vec![("Authorization".to_string(), "new".to_string())]
+        );
+    }
+
+    #[test]
+    fn response_scope_reports_ok_and_keeps_the_body() {
+        let r = RawResponse {
+            status: 502,
+            headers: json!({}),
+            body: json!("<html>oops</html>"),
+        };
+        let s = r.to_scope();
+        assert_eq!(s["ok"], json!(false));
+        assert_eq!(s["status"], json!(502));
+        assert_eq!(s["body"], json!("<html>oops</html>"));
+    }
+}
