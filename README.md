@@ -1,75 +1,93 @@
 # gcgcgen
 
 A constructor for payment-gateway integrations. One service hosts many
-gateways; each is a **document**, not a code change.
+gateways
 
-An integration document says how to turn the platform's connect contract into
-some gateway's API: what settings arrive, how to authenticate, which requests
-each method makes, how their fields map, and how the gateway's answer becomes
-`approved | declined | pending`.
+## Run
 
-## Layout
-
-```
-crates/connect/   the reactivepay-facing contract — request/response envelopes,
-                  the canonical status vocabulary, the interaction log. No HTTP,
-                  no clock, no async: it compiles to wasm and could equally back
-                  a hand-written adapter.
-src/spec/         the integration document, the expression language, templates,
-                  and validation. Pure and wasm-clean, so the editor validates a
-                  document as it is typed with no round trip.
-src/engine/       execution: rendering, sending, auth and the token cache,
-                  logging, and the method executor.
-src/api/          POST /gw/{key}/{pay|payout|refund|status}
-src/db/           SQLite storage, versioned on every save.
-src/ui/           the Leptos editor.
-fixtures/         scripay.json — a real integration, and the acceptance test.
-examples/         stub_gateway.rs — a fake gateway for local testing.
-```
-
-## Running it
-
-```sh
-cargo leptos watch                      # http://127.0.0.1:9595
-cargo run --example stub_gateway --features ssr   # http://127.0.0.1:8899
+```bash
+cargo leptos watch # http://127.0.0.1:64476
 ```
 
 Seed a document without clicking through the editor:
 
-```sh
+```bash
 cargo run --features ssr -- --import fixtures/scripay.json
 ```
 
-`DATABASE_URL` (default `sqlite://gcgcgen.db`) and `CALLBACK_BASE` (the public
-origin gateways call back on) are the two settings worth setting.
+Settings worth setting:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | `sqlite://gcgcgen.db` | Where documents are stored |
+| `CALLBACK_BASE` | the site address | The public origin gateways call back on |
+| `BUSINESS_URL` | `http://business:4000` | Where callbacks are forwarded |
+| `SIGN_KEY` | unset | The 32-byte key that signs forwarded callbacks. Without it, every forward fails |
+| `CALLBACK_CONTEXT_TTL_HOURS` | `24` | How long a pending payment waits for its callback |
+| `API_USER` | `admin` | Basic-auth user for the editor |
+| `API_PASSWORD` | unset | Basic-auth password. **Without it the editor is open to anyone who can reach it** |
+
+The editor sits behind HTTP basic auth: its pages, the `/api` server functions
+that read, write, roll back and dry-run integrations, and the asset bundle. The
+browser prompts on the first page load and reuses the credentials from there.
+`/gw`, the gateway-facing surface, is unauthenticated: reactivepay and the
+gateways call it with no credentials.
 
 ## Field mapping
 
-A request body is JSON whose string leaves may contain `{{ … }}`. Paste the
-gateway's example and replace the values:
+Every authored field is one expression, evaluated against the scope. A request
+body is normally an object literal — near-JSON, since keys are string literals
+— so the gateway's example still pastes in; unquote the values you want
+computed:
 
 ```json
-{
-  "order_id": "{{ payment.token }}",
-  "amount":   "{{ payment.gateway_amount | minor_to_major }}",
-  "channel":  "{{? params.extra_return_param | null_if('_blank_') ?? settings.channel }}",
-  "data": {
-    "account_name": "{{? [params.first_name, params.last_name] | join(' ') | trim }}"
-  }
+"body": { "kind": "json", "expr":
+  "{ \"order_id\": payment.token,
+     \"amount\": payment.gateway_amount | minor_to_major,
+     \"channel\": (params.extra_return_param | null_if('_blank_')) ?? settings.channel,
+     \"data\": {
+       \"account_name\": [params.first_name, params.last_name] | join(' ') | trim
+     } }"
 }
 ```
 
-Three rules do the work:
+Four rules do the work:
 
-- **A lone placeholder keeps its type.** `"{{ … | minor_to_major }}"` renders as
-  the number `10`, not `"10"`.
-- **`{{? … }}` omits.** An absent result drops the key or array element.
-- **Absent means `null` or `""`**, uniformly — for `??`, for `{{? }}`, and for
-  the builtins that skip absent inputs.
+- **Values keep their type.** `payment.gateway_amount | minor_to_major` is the
+  number `10`, not `"10"`.
+- **Absence omits.** A missing path is *void*, and a void value drops the key,
+  the array element, or the whole field it fills — a `redirect_request` url, a
+  header, a query parameter. `void_as_null(…)` is how you keep an explicit
+  `null` in a body.
+- **Blank is absent**, uniformly: `""` and `null` reaching a builtin come back
+  void, so `[a, b] | join(' ') | trim` drops its key when neither name was
+  supplied. (`??` is the exception: it falls through on null and void, not on
+  `""`.)
+- **`|` is the loosest operator.** `a | f ?? b` reads as `a | (f ?? b)`, so a
+  fallback after a call needs parentheses.
+
+Text is a quoted literal — `'/v1/gateway/initiate/collection'` — and single
+quotes save a round of escaping inside the JSON document. There is no string
+interpolation: join text with `+` for two strings, or `concat([…])`, which
+stringifies numbers and skips what is absent. Note that a string literal has no
+`\n`-style escapes; a canonical signature string that needs a newline carries a
+real one.
 
 Scope roots: `payment`, `params`, `settings`, `steps`, `env`, `method`; plus
-`resp` inside a response spec and `req` inside a signature's canonical string.
-A missing path is `null`, never an error.
+`resp` inside a response spec and `req` inside a signature's canonical
+expression. A missing path is void, never an error — though reading a field off
+a string or a number is, so a body that is not the shape the spec expects fails
+loudly.
+
+A request's `envelope` picks the wire format of that body: `json` (the default,
+`application/json`) or `form` (`application/x-www-form-urlencoded`). A form
+body must evaluate to an object; nested values flatten to `a[b]` / `a[0]` keys,
+scalars to their plain text, and nulls are dropped. The token request of a
+`token_request` auth takes the same field.
+
+Keys come out sorted, not in the order they were written: an object literal is
+a hash map. Nothing on the wire depends on body key order — but if a gateway
+ever signs a concatenation of the body as sent, check it.
 
 ## Multi-step methods
 
@@ -78,43 +96,44 @@ before it under `steps.<name>`, which always carries `ok`, `status`, `headers`
 and `body`:
 
 ```json
-{ "reference": "{{ steps.enquiry.body.reference }}" }
+"expr": "{ \"reference\": steps.enquiry.body.reference }"
 ```
 
-## Auth
+## The result
 
-Defined once per integration and referenced by id, so pay, payout, refund and
-status share one cached token. Kinds: none, bearer, basic, header, query,
-signature (HMAC/digest over the rendered request), and **token request** — a
-real HTTP call whose result is cached.
+Each method ends with a `result` block: the status plus the optional facts the
+platform records.
 
-A token request's `cache_key` must include a merchant-specific setting.
-Validation refuses to save one without it, because an empty cache key would let
-two merchants on the same integration share a token.
-
-## What the engine decides, not the document
-
-Per-integration configuration is the wrong place to re-litigate these:
-
-1. **Uncertainty is `pending`, never `declined`.** A transport error, a 5xx or
-   an unreadable body all mean the gateway may have taken the money.
-2. **Every outbound call is logged**, auth calls included — the engine opens the
-   span, so a document cannot describe an unlogged request.
-3. **Failures are HTTP 200** with `{"result": false, …}`; a non-200 makes the
-   platform retry instead of recording the failure.
-4. **Secrets are redacted from logs** by value, driven by the settings schema's
-   `secret` flags.
-
-Credentials arrive in the `settings` bucket of every request and are never
-stored.
-
-## Tests
-
-```sh
-cargo test --features ssr
+```json
+"result": {
+  "status": "\"pending\"",
+  "gateway_token": "steps.charge.body.rrn",
+  "redirect_request": {
+    "type": "post",
+    "url": "steps.charge.body.pay_url",
+    "params": "{ \"order\": payment.token }"
+  },
+  "requisites": "{ \"account\": steps.charge.body.account }"
+}
 ```
 
-No test contacts a real gateway. `tests/scripay_mapping.rs` is the acceptance
-test: it renders the Scripay document and asserts the output matches the
-hand-written adapter it replaces. `tests/engine_execution.rs` runs the engine
-against `wiremock`, mostly to pin down the error matrix.
+- **`redirect_request`** hands the shopper over to the gateway's own page.
+  `type` is one of `post`, `get`, `get_with_processing`, `post_iframes` or
+  `redirect_html`. A url that evaluates to nothing drops the whole block, so one
+  document serves both a hosted checkout and a straight-through charge.
+- **`requisites`** is any object, passed through untouched — a bank account, a
+  till number, a reference. Like a request body it is one expression, and a void
+  value drops its key.
+
+## Reading a response
+
+A request succeeds when its `success_when` expression is truthy. It sees `resp`
+— `ok` (HTTP 2xx), `status`, `headers` and `body` — so one expression says the
+whole thing:
+
+```json
+"response": {
+  "success_when": "resp.ok && resp.body.status == \"Success\"",
+  "error": { "message": "resp.body.message", "on_error": "fail" }
+}
+```

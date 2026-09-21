@@ -1,688 +1,534 @@
-//! The builtin function table.
+//! The builtins, declared as mahoraga functions.
 //!
-//! Every builtin is pure: it takes the piped-in value plus already-evaluated
-//! arguments and returns a value. Nothing here reads the clock, the network or
-//! a random source — non-deterministic inputs (`env.now`, `env.request_id`)
-//! are injected into the scope by the caller instead, which keeps previews in
-//! the browser identical to execution on the server.
+//! Every one takes its piped input as the first argument. All but `default`
+//! are wrapped in [`SkipBlank`], which is what makes absence flow through a
+//! pipeline instead of collapsing to `""`.
+
+use std::rc::Rc;
 
 use base64::Engine as _;
-use serde_json::{Map, Number, Value};
+use mahoraga::value::Object;
+use mahoraga::{declare_fn, Args, Callable, Error, Function, Value};
 
-/// A value is "absent" when it is `null` or the empty string. Absence drives
-/// `??`, `{{? }}` omission, and argument skipping in [`join`]-style builtins.
-///
-/// Treating `""` as absent is deliberate: gateways and the platform use empty
-/// strings and missing keys interchangeably, and the alternative is every
-/// expression in every spec carrying a `| null_if('')`.
-pub fn is_absent(v: &Value) -> bool {
-    match v {
-        Value::Null => true,
-        Value::String(s) => s.is_empty(),
-        _ => false,
-    }
+pub fn builtins() -> impl Iterator<Item = (&'static str, Rc<Function>)> {
+    [
+        skip_blank(declare_fn!(
+            "minor_to_major",
+            money::minor_to_major,
+            (Num),
+            "Minor units to major, e.g. 1000 -> 10. Stays an integer when whole."
+        )),
+        skip_blank(declare_fn!(
+            "major_to_minor",
+            money::major_to_minor,
+            (Num),
+            "Major units to minor, e.g. 10.5 -> 1050."
+        )),
+        skip_blank(declare_fn!(
+            "null_if",
+            absence::null_if,
+            (Value, Value),
+            "Absent when the input equals the argument."
+        )),
+        declare_fn!(
+            "default",
+            absence::default_to,
+            (Value, Value),
+            "The argument when the input is absent."
+        ),
+        skip_blank(declare_fn!(
+            "trim",
+            string::trim,
+            (Text),
+            "Strips surrounding whitespace."
+        )),
+        skip_blank(declare_fn!("upper", string::upper, (Text), "Uppercases.")),
+        skip_blank(declare_fn!("lower", string::lower, (Text), "Lowercases.")),
+        skip_blank(declare_fn!(
+            "join",
+            string::join,
+            (Value, Text),
+            "Joins an array, skipping absent elements."
+        )),
+        skip_blank(declare_fn!(
+            "split",
+            string::split,
+            (Text, Text),
+            "Splits a string into an array."
+        )),
+        skip_blank(declare_fn!(
+            "substr",
+            string::substr,
+            (Text, Count),
+            "substr(start), by chars."
+        )),
+        skip_blank(declare_fn!(
+            "replace",
+            string::replace,
+            (Text, Text, Text),
+            "Replaces every occurrence."
+        )),
+        skip_blank(declare_fn!(
+            "pad_start",
+            string::pad_start,
+            (Text, Count, Text),
+            "Left-pads to a width with a fill char."
+        )),
+        skip_blank(declare_fn!(
+            "to_string",
+            casts::to_string,
+            (Text),
+            "Renders as a string."
+        )),
+        skip_blank(declare_fn!(
+            "to_number",
+            casts::to_number,
+            (Num),
+            "Parses as a number."
+        )),
+        skip_blank(declare_fn!(
+            "to_bool",
+            casts::to_bool,
+            (Value),
+            "Truthiness as a bool."
+        )),
+        skip_blank(declare_fn!(
+            "base64",
+            encoding::base64,
+            (Text),
+            "Standard base64."
+        )),
+        skip_blank(declare_fn!(
+            "base64url",
+            encoding::base64url,
+            (Text),
+            "URL-safe base64, unpadded."
+        )),
+        skip_blank(declare_fn!("hex", encoding::hex, (Text), "Lowercase hex.")),
+        skip_blank(declare_fn!(
+            "md5",
+            digests::md5,
+            (Text),
+            "MD5, lowercase hex."
+        )),
+        skip_blank(declare_fn!(
+            "sha256",
+            digests::sha256,
+            (Text),
+            "SHA-256, lowercase hex."
+        )),
+        skip_blank(declare_fn!(
+            "sha512",
+            digests::sha512,
+            (Text),
+            "SHA-512, lowercase hex."
+        )),
+        skip_blank(declare_fn!(
+            "hmac_sha256",
+            digests::hmac_sha256,
+            (Text, Text),
+            "HMAC-SHA-256 with the given key, lowercase hex."
+        )),
+        skip_blank(declare_fn!(
+            "hmac_sha512",
+            digests::hmac_sha512,
+            (Text, Text),
+            "HMAC-SHA-512 with the given key, lowercase hex."
+        )),
+        skip_blank(declare_fn!(
+            "map",
+            table::map_lookup,
+            (Text, Object),
+            "Table lookup, e.g. status | map({\"Success\": \"approved\", \"_default\": \"pending\"})."
+        )),
+    ]
+    .into_iter()
 }
 
-pub struct FnSpec {
-    pub name: &'static str,
-    pub min_args: usize,
-    pub max_args: usize,
-    /// When true, an absent input short-circuits to `null` without calling `f`.
-    pub skip_absent: bool,
-    pub f: fn(Value, &[Value]) -> Result<Value, String>,
-    pub help: &'static str,
-}
+/// Blank in, blank out: both become void, so the key, element or field the
+/// value was filling is dropped rather than sent empty.
+struct SkipBlank(Box<dyn Callable>);
 
-pub fn lookup(name: &str) -> Option<&'static FnSpec> {
-    BUILTINS.iter().find(|s| s.name == name)
-}
-
-pub fn names() -> impl Iterator<Item = &'static str> {
-    BUILTINS.iter().map(|s| s.name)
-}
-
-macro_rules! spec {
-    ($name:literal, $min:literal..=$max:literal, $skip:literal, $f:expr, $help:literal) => {
-        FnSpec {
-            name: $name,
-            min_args: $min,
-            max_args: $max,
-            skip_absent: $skip,
-            f: $f,
-            help: $help,
+impl Callable for SkipBlank {
+    fn call(&self, args: Args) -> mahoraga::Result<Value> {
+        if args.0.first().is_some_and(Value::blank) {
+            return Ok(Value::Void);
         }
+        let out = self.0.call(args)?;
+        Ok(if out.blank() { Value::Void } else { out })
+    }
+
+    fn arity(&self) -> usize {
+        self.0.arity()
+    }
+}
+
+fn skip_blank((name, f): (&'static str, Rc<Function>)) -> (&'static str, Rc<Function>) {
+    let f = Rc::try_unwrap(f).expect("just declared, so unique");
+    let wrapped = Function {
+        name: f.name,
+        help: f.help,
+        f: Box::new(SkipBlank(f.f)),
     };
+    (name, Rc::new(wrapped))
 }
 
-static BUILTINS: &[FnSpec] = &[
-    // -- money ------------------------------------------------------------
-    spec!(
-        "minor_to_major",
-        0..=1,
-        true,
-        minor_to_major,
-        "Minor units to major, e.g. 1000 -> 10. Stays an integer when whole."
-    ),
-    spec!(
-        "major_to_minor",
-        0..=1,
-        true,
-        major_to_minor,
-        "Major units to minor, e.g. 10.5 -> 1050."
-    ),
-    // -- absence ----------------------------------------------------------
-    spec!(
-        "null_if",
-        1..=1,
-        true,
-        null_if,
-        "null when the input equals the argument."
-    ),
-    spec!(
-        "default",
-        1..=1,
-        false,
-        default_to,
-        "The argument when the input is absent."
-    ),
-    // -- string -----------------------------------------------------------
-    spec!(
-        "trim",
-        0..=0,
-        true,
-        |v, _| text(&v).map(|s| str_or_null(s.trim())),
-        "Strips surrounding whitespace."
-    ),
-    spec!(
-        "upper",
-        0..=0,
-        true,
-        |v, _| text(&v).map(|s| Value::String(s.to_uppercase())),
-        "Uppercases."
-    ),
-    spec!(
-        "lower",
-        0..=0,
-        true,
-        |v, _| text(&v).map(|s| Value::String(s.to_lowercase())),
-        "Lowercases."
-    ),
-    spec!(
-        "join",
-        0..=1,
-        true,
-        join,
-        "Joins an array, skipping absent elements."
-    ),
-    spec!(
-        "split",
-        1..=1,
-        true,
-        split,
-        "Splits a string into an array."
-    ),
-    spec!(
-        "concat",
-        0..=8,
-        true,
-        concat,
-        "Appends every argument to the input."
-    ),
-    spec!(
-        "substr",
-        1..=2,
-        true,
-        substr,
-        "substr(start) or substr(start, len), by chars."
-    ),
-    spec!(
-        "replace",
-        2..=2,
-        true,
-        replace,
-        "Replaces every occurrence."
-    ),
-    spec!(
-        "pad_start",
-        2..=2,
-        true,
-        pad_start,
-        "Left-pads to a width with a fill char."
-    ),
-    // -- casts ------------------------------------------------------------
-    spec!(
-        "to_string",
-        0..=0,
-        true,
-        |v, _| text(&v).map(Value::String),
-        "Renders as a string."
-    ),
-    spec!("to_number", 0..=0, true, to_number, "Parses as a number."),
-    spec!("to_bool", 0..=0, true, to_bool, "Truthiness as a bool."),
-    // -- encoding ---------------------------------------------------------
-    spec!(
-        "base64",
-        0..=0,
-        true,
-        |v, _| bytes(&v)
-            .map(|b| Value::String(base64::engine::general_purpose::STANDARD.encode(b))),
-        "Standard base64."
-    ),
-    spec!(
-        "base64url",
-        0..=0,
-        true,
-        |v, _| bytes(&v)
-            .map(|b| Value::String(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b))),
-        "URL-safe base64, unpadded."
-    ),
-    spec!(
-        "hex",
-        0..=0,
-        true,
-        |v, _| bytes(&v).map(|b| Value::String(hex::encode(b))),
-        "Lowercase hex."
-    ),
-    // -- digests ----------------------------------------------------------
-    spec!(
-        "md5",
-        0..=0,
-        true,
-        |v, _| digest_md5(&v),
-        "MD5, lowercase hex."
-    ),
-    spec!(
-        "sha256",
-        0..=0,
-        true,
-        |v, _| digest_sha256(&v),
-        "SHA-256, lowercase hex."
-    ),
-    spec!(
-        "sha512",
-        0..=0,
-        true,
-        |v, _| digest_sha512(&v),
-        "SHA-512, lowercase hex."
-    ),
-    spec!(
-        "hmac_sha256",
-        1..=1,
-        true,
-        hmac_sha256,
-        "HMAC-SHA-256 with the given key, lowercase hex."
-    ),
-    spec!(
-        "hmac_sha512",
-        1..=1,
-        true,
-        hmac_sha512,
-        "HMAC-SHA-512 with the given key, lowercase hex."
-    ),
-    // -- lookup -----------------------------------------------------------
-    spec!(
-        "map",
-        1..=1,
-        true,
-        map_lookup,
-        "Table lookup, e.g. status | map({Success:'approved', _default:'pending'})."
-    ),
-];
+/// A scalar as text. Containers are an error rather than a silent `"[object]"`.
+struct Text(String);
 
-// ---------------------------------------------------------------------------
-// coercions
-// ---------------------------------------------------------------------------
+impl TryFrom<Value> for Text {
+    type Error = Error;
 
-/// Renders a scalar as text. Arrays and objects have no sensible rendering
-/// here, so they are an error rather than a silent `"[object]"`.
-fn text(v: &Value) -> Result<String, String> {
-    match v {
-        Value::String(s) => Ok(s.clone()),
-        Value::Number(n) => Ok(n.to_string()),
-        Value::Bool(b) => Ok(b.to_string()),
-        Value::Null => Ok(String::new()),
-        Value::Array(_) => Err("expected a scalar, got an array".into()),
-        Value::Object(_) => Err("expected a scalar, got an object".into()),
+    fn try_from(v: Value) -> Result<Self, Error> {
+        Ok(Text(match v {
+            Value::String(s) => s,
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null | Value::Void => String::new(),
+            other => return Err(expected("a scalar", &other)),
+        }))
     }
 }
 
-/// Empty text becomes `null` so that absence propagates through a pipeline
-/// instead of turning into `""` halfway down it.
-fn str_or_null(s: &str) -> Value {
-    if s.is_empty() {
-        Value::Null
-    } else {
-        Value::String(s.to_string())
-    }
-}
+/// A number, or a string that reads as one: gateways quote their amounts.
+struct Num(f64);
 
-fn bytes(v: &Value) -> Result<Vec<u8>, String> {
-    text(v).map(String::into_bytes)
-}
+impl TryFrom<Value> for Num {
+    type Error = Error;
 
-fn number(v: &Value) -> Result<f64, String> {
-    match v {
-        Value::Number(n) => n.as_f64().ok_or_else(|| "number is out of range".into()),
-        Value::String(s) => s
-            .trim()
-            .parse()
-            .map_err(|_| format!("`{s}` is not a number")),
-        other => Err(format!("expected a number, got {}", kind(other))),
-    }
-}
-
-fn kind(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "a bool",
-        Value::Number(_) => "a number",
-        Value::String(_) => "a string",
-        Value::Array(_) => "an array",
-        Value::Object(_) => "an object",
-    }
-}
-
-fn exponent(args: &[Value]) -> Result<u32, String> {
-    match args.first() {
-        None => Ok(2),
-        Some(v) => {
-            let n = number(v)?;
-            if !(0.0..=9.0).contains(&n) || n.fract() != 0.0 {
-                return Err(format!("exponent must be an integer 0..=9, got {n}"));
-            }
-            Ok(n as u32)
+    fn try_from(v: Value) -> Result<Self, Error> {
+        match v {
+            Value::Number(n) => Ok(Num(n)),
+            Value::String(ref s) => s
+                .trim()
+                .parse()
+                .map(Num)
+                .map_err(|_| Error::new(format!("`{s}` is not a number"))),
+            other => Err(expected("a number", &other)),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// money
-// ---------------------------------------------------------------------------
+/// A whole, non-negative number, for a length or an offset.
+struct Count(usize);
 
-/// Mirrors oxyscripay's `minor_to_major`: whole amounts stay integers because
-/// some gateways reject `100.0` where they accept `100`.
-fn minor_to_major(v: Value, args: &[Value]) -> Result<Value, String> {
-    let exp = exponent(args)?;
-    let divisor = 10u64.pow(exp);
-    let minor = number(&v)?;
-    if minor.fract() != 0.0 {
-        return Err(format!("minor units must be a whole number, got {minor}"));
-    }
-    let minor = minor as i64;
-    if minor % (divisor as i64) == 0 {
-        Ok(Value::Number(Number::from(minor / divisor as i64)))
-    } else {
-        let major = minor as f64 / divisor as f64;
-        Number::from_f64(major)
-            .map(Value::Number)
-            .ok_or_else(|| format!("{major} is not representable"))
-    }
-}
+impl TryFrom<Value> for Count {
+    type Error = Error;
 
-fn major_to_minor(v: Value, args: &[Value]) -> Result<Value, String> {
-    let exp = exponent(args)?;
-    let scaled = (number(&v)? * 10f64.powi(exp as i32)).round();
-    if !scaled.is_finite() {
-        return Err("amount is not finite".into());
-    }
-    Ok(Value::Number(Number::from(scaled.max(0.0) as u64)))
-}
-
-// ---------------------------------------------------------------------------
-// absence
-// ---------------------------------------------------------------------------
-
-fn null_if(v: Value, args: &[Value]) -> Result<Value, String> {
-    Ok(if v == args[0] { Value::Null } else { v })
-}
-
-fn default_to(v: Value, args: &[Value]) -> Result<Value, String> {
-    Ok(if is_absent(&v) { args[0].clone() } else { v })
-}
-
-// ---------------------------------------------------------------------------
-// string
-// ---------------------------------------------------------------------------
-
-/// Joins an array (or passes a scalar through), skipping absent elements so
-/// `[first_name, last_name] | join(' ')` never yields a leading space.
-fn join(v: Value, args: &[Value]) -> Result<Value, String> {
-    let sep = match args.first() {
-        Some(s) => text(s)?,
-        None => String::new(),
-    };
-    let items = match v {
-        Value::Array(items) => items,
-        scalar => vec![scalar],
-    };
-    let parts = items
-        .iter()
-        .filter(|i| !is_absent(i))
-        .map(text)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(str_or_null(&parts.join(&sep)))
-}
-
-fn split(v: Value, args: &[Value]) -> Result<Value, String> {
-    let sep = text(&args[0])?;
-    if sep.is_empty() {
-        return Err("split separator must not be empty".into());
-    }
-    Ok(Value::Array(
-        text(&v)?
-            .split(sep.as_str())
-            .map(|p| Value::String(p.to_string()))
-            .collect(),
-    ))
-}
-
-fn concat(v: Value, args: &[Value]) -> Result<Value, String> {
-    let mut out = text(&v)?;
-    for a in args {
-        if !is_absent(a) {
-            out.push_str(&text(a)?);
+    fn try_from(v: Value) -> Result<Self, Error> {
+        match Num::try_from(v)?.0 {
+            n if n >= 0.0 && n.fract() == 0.0 => Ok(Count(n as usize)),
+            n => Err(Error::new(format!(
+                "expected a whole, non-negative number, got {n}"
+            ))),
         }
     }
-    Ok(str_or_null(&out))
 }
 
-fn substr(v: Value, args: &[Value]) -> Result<Value, String> {
-    let s = text(&v)?;
-    let start = number(&args[0])?;
-    if start < 0.0 || start.fract() != 0.0 {
-        return Err(format!("start must be a non-negative integer, got {start}"));
-    }
-    let chars: Vec<char> = s.chars().collect();
-    let start = (start as usize).min(chars.len());
-    let end = match args.get(1) {
-        None => chars.len(),
-        Some(l) => {
-            let len = number(l)?;
-            if len < 0.0 || len.fract() != 0.0 {
-                return Err(format!("length must be a non-negative integer, got {len}"));
-            }
-            start.saturating_add(len as usize).min(chars.len())
+fn expected(what: &str, got: &Value) -> Error {
+    Error::new(format!("expected {what}, got {}", got.value_type()))
+}
+
+mod money {
+    use super::*;
+
+    /// Fixed, because a builtin has one arity: a zero-decimal currency needs
+    /// optional arguments first.
+    const EXPONENT: i32 = 2;
+
+    /// Mirrors oxyscripay's `minor_to_major`: whole amounts stay integers
+    /// because some gateways reject `100.0` where they accept `100`.
+    pub fn minor_to_major(v: Num) -> mahoraga::Result<Value> {
+        if v.0.fract() != 0.0 {
+            return Err(Error::new(format!(
+                "minor units must be a whole number, got {}",
+                v.0
+            )));
         }
-    };
-    Ok(str_or_null(&chars[start..end].iter().collect::<String>()))
-}
-
-fn replace(v: Value, args: &[Value]) -> Result<Value, String> {
-    let from = text(&args[0])?;
-    if from.is_empty() {
-        return Err("replace pattern must not be empty".into());
+        Ok(Value::Number(v.0 / 10f64.powi(EXPONENT)))
     }
-    Ok(str_or_null(
-        &text(&v)?.replace(from.as_str(), &text(&args[1])?),
-    ))
-}
 
-fn pad_start(v: Value, args: &[Value]) -> Result<Value, String> {
-    let width = number(&args[0])?;
-    if width < 0.0 || width.fract() != 0.0 {
-        return Err(format!("width must be a non-negative integer, got {width}"));
+    pub fn major_to_minor(v: Num) -> mahoraga::Result<Value> {
+        let scaled = (v.0 * 10f64.powi(EXPONENT)).round();
+        if !scaled.is_finite() {
+            return Err(Error::new("amount is not finite"));
+        }
+        Ok(Value::Number(scaled.max(0.0)))
     }
-    let fill = text(&args[1])?;
-    let mut fill = fill.chars();
-    let (Some(fill), None) = (fill.next(), fill.next()) else {
-        return Err("fill must be exactly one character".into());
-    };
-    let s = text(&v)?;
-    let missing = (width as usize).saturating_sub(s.chars().count());
-    Ok(Value::String(
-        std::iter::repeat_n(fill, missing)
-            .chain(s.chars())
-            .collect(),
-    ))
 }
 
-// ---------------------------------------------------------------------------
-// casts
-// ---------------------------------------------------------------------------
+mod absence {
+    use super::*;
 
-fn to_number(v: Value, _: &[Value]) -> Result<Value, String> {
-    let n = number(&v)?;
-    Number::from_f64(n)
-        .map(Value::Number)
-        .ok_or_else(|| format!("{n} is not representable"))
+    pub fn null_if(v: Value, other: Value) -> mahoraga::Result<Value> {
+        Ok(if v == other { Value::Void } else { v })
+    }
+
+    pub fn default_to(v: Value, fallback: Value) -> mahoraga::Result<Value> {
+        Ok(if v.blank() { fallback } else { v })
+    }
 }
 
-fn to_bool(v: Value, _: &[Value]) -> Result<Value, String> {
-    Ok(Value::Bool(match &v {
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !matches!(s.to_ascii_lowercase().as_str(), "false" | "0" | "no"),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-        Value::Null => false,
-    }))
+mod string {
+    use super::*;
+
+    pub fn trim(v: Text) -> mahoraga::Result<Value> {
+        Ok(Value::String(v.0.trim().to_string()))
+    }
+
+    pub fn upper(v: Text) -> mahoraga::Result<Value> {
+        Ok(Value::String(v.0.to_uppercase()))
+    }
+
+    pub fn lower(v: Text) -> mahoraga::Result<Value> {
+        Ok(Value::String(v.0.to_lowercase()))
+    }
+
+    /// Joins an array (or passes a scalar through), skipping absent elements so
+    /// `[first_name, last_name] | join(" ")` never yields a leading space.
+    pub fn join(v: Value, sep: Text) -> mahoraga::Result<Value> {
+        let items = match v {
+            Value::Array(items) => items.0,
+            scalar => vec![scalar],
+        };
+        let parts = items
+            .into_iter()
+            .filter(|i| !i.blank())
+            .map(|i| Text::try_from(i).map(|t| t.0))
+            .collect::<mahoraga::Result<Vec<_>>>()?;
+        Ok(Value::String(parts.join(&sep.0)))
+    }
+
+    pub fn split(v: Text, sep: Text) -> mahoraga::Result<Value> {
+        if sep.0.is_empty() {
+            return Err(Error::new("separator must not be empty"));
+        }
+        let parts: Vec<Value> = v.0.split(sep.0.as_str()).map(Value::from).collect();
+        Ok(parts.into())
+    }
+
+    pub fn substr(v: Text, start: Count) -> mahoraga::Result<Value> {
+        Ok(Value::String(v.0.chars().skip(start.0).collect()))
+    }
+
+    pub fn replace(v: Text, from: Text, to: Text) -> mahoraga::Result<Value> {
+        if from.0.is_empty() {
+            return Err(Error::new("pattern must not be empty"));
+        }
+        Ok(Value::String(v.0.replace(from.0.as_str(), &to.0)))
+    }
+
+    pub fn pad_start(v: Text, width: Count, fill: Text) -> mahoraga::Result<Value> {
+        let mut chars = fill.0.chars();
+        let (Some(fill), None) = (chars.next(), chars.next()) else {
+            return Err(Error::new("fill must be exactly one character"));
+        };
+        let missing = width.0.saturating_sub(v.0.chars().count());
+        Ok(Value::String(
+            std::iter::repeat_n(fill, missing)
+                .chain(v.0.chars())
+                .collect(),
+        ))
+    }
 }
 
-// ---------------------------------------------------------------------------
-// digests
-// ---------------------------------------------------------------------------
+mod casts {
+    use super::*;
 
-fn digest_md5(v: &Value) -> Result<Value, String> {
-    use md5::{Digest, Md5};
-    let mut h = Md5::new();
-    h.update(bytes(v)?);
-    Ok(Value::String(hex::encode(h.finalize())))
+    pub fn to_string(v: Text) -> mahoraga::Result<Value> {
+        Ok(Value::String(v.0))
+    }
+
+    pub fn to_number(v: Num) -> mahoraga::Result<Value> {
+        Ok(Value::Number(v.0))
+    }
+
+    pub fn to_bool(v: Value) -> mahoraga::Result<Value> {
+        Ok(Value::Bool(match &v {
+            Value::String(s) => !matches!(s.to_ascii_lowercase().as_str(), "false" | "0" | "no"),
+            other => other.truthy(),
+        }))
+    }
 }
 
-fn digest_sha256(v: &Value) -> Result<Value, String> {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes(v)?);
-    Ok(Value::String(hex::encode(h.finalize())))
+mod encoding {
+    use super::*;
+
+    pub fn base64(v: Text) -> mahoraga::Result<Value> {
+        Ok(Value::String(
+            base64::engine::general_purpose::STANDARD.encode(v.0),
+        ))
+    }
+
+    pub fn base64url(v: Text) -> mahoraga::Result<Value> {
+        Ok(Value::String(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.0),
+        ))
+    }
+
+    pub fn hex(v: Text) -> mahoraga::Result<Value> {
+        Ok(Value::String(hex::encode(v.0)))
+    }
 }
 
-fn digest_sha512(v: &Value) -> Result<Value, String> {
-    use sha2::{Digest, Sha512};
-    let mut h = Sha512::new();
-    h.update(bytes(v)?);
-    Ok(Value::String(hex::encode(h.finalize())))
+mod digests {
+    use super::*;
+
+    pub fn md5(v: Text) -> mahoraga::Result<Value> {
+        use md5::{Digest, Md5};
+        Ok(Value::String(hex::encode(Md5::digest(v.0.as_bytes()))))
+    }
+
+    pub fn sha256(v: Text) -> mahoraga::Result<Value> {
+        use sha2::{Digest, Sha256};
+        Ok(Value::String(hex::encode(Sha256::digest(v.0.as_bytes()))))
+    }
+
+    pub fn sha512(v: Text) -> mahoraga::Result<Value> {
+        use sha2::{Digest, Sha512};
+        Ok(Value::String(hex::encode(Sha512::digest(v.0.as_bytes()))))
+    }
+
+    pub fn hmac_sha256(v: Text, key: Text) -> mahoraga::Result<Value> {
+        use hmac::{Hmac, KeyInit, Mac};
+        let mut mac = <Hmac<sha2::Sha256>>::new_from_slice(key.0.as_bytes())
+            .map_err(|e| Error::new(format!("invalid hmac key: {e}")))?;
+        mac.update(v.0.as_bytes());
+        Ok(Value::String(hex::encode(mac.finalize().into_bytes())))
+    }
+
+    pub fn hmac_sha512(v: Text, key: Text) -> mahoraga::Result<Value> {
+        use hmac::{Hmac, KeyInit, Mac};
+        let mut mac = <Hmac<sha2::Sha512>>::new_from_slice(key.0.as_bytes())
+            .map_err(|e| Error::new(format!("invalid hmac key: {e}")))?;
+        mac.update(v.0.as_bytes());
+        Ok(Value::String(hex::encode(mac.finalize().into_bytes())))
+    }
 }
 
-fn hmac_sha256(v: Value, args: &[Value]) -> Result<Value, String> {
-    use hmac::{Hmac, KeyInit, Mac};
-    let mut mac = <Hmac<sha2::Sha256>>::new_from_slice(&bytes(&args[0])?)
-        .map_err(|e| format!("invalid hmac key: {e}"))?;
-    mac.update(&bytes(&v)?);
-    Ok(Value::String(hex::encode(mac.finalize().into_bytes())))
-}
+mod table {
+    use super::*;
 
-fn hmac_sha512(v: Value, args: &[Value]) -> Result<Value, String> {
-    use hmac::{Hmac, KeyInit, Mac};
-    let mut mac = <Hmac<sha2::Sha512>>::new_from_slice(&bytes(&args[0])?)
-        .map_err(|e| format!("invalid hmac key: {e}"))?;
-    mac.update(&bytes(&v)?);
-    Ok(Value::String(hex::encode(mac.finalize().into_bytes())))
-}
-
-// ---------------------------------------------------------------------------
-// lookup
-// ---------------------------------------------------------------------------
-
-/// `status | map({Success: 'approved', _default: 'pending'})`
-fn map_lookup(v: Value, args: &[Value]) -> Result<Value, String> {
-    let Value::Object(table) = &args[0] else {
-        return Err(format!("map expects an object, got {}", kind(&args[0])));
-    };
-    let key = text(&v)?;
-    Ok(lookup_key(table, &key))
-}
-
-fn lookup_key(table: &Map<String, Value>, key: &str) -> Value {
-    table
-        .get(key)
-        .or_else(|| table.get("_default"))
-        .cloned()
-        .unwrap_or(Value::Null)
+    /// `status | map({"Success": "approved", "_default": "pending"})`
+    pub fn map_lookup(v: Text, table: Object) -> mahoraga::Result<Value> {
+        Ok(table
+            .0
+            .get(&v.0)
+            .or_else(|| table.0.get("_default"))
+            .cloned()
+            .unwrap_or(Value::Void))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
+    use crate::spec::expr::Expr;
+    use serde_json::{json, Value};
 
-    fn call(name: &str, input: Value, args: &[Value]) -> Result<Value, String> {
-        let spec = lookup(name).unwrap_or_else(|| panic!("no builtin `{name}`"));
-        if spec.skip_absent && is_absent(&input) {
-            return Ok(Value::Null);
-        }
-        (spec.f)(input, args)
+    /// Builtins are exercised the way a document reaches them.
+    fn ev(src: &str) -> Option<Value> {
+        Expr::parse(src)
+            .unwrap_or_else(|e| panic!("{src}: {e}"))
+            .eval(&json!({}))
+            .unwrap_or_else(|e| panic!("{src}: {e}"))
+    }
+
+    fn err(src: &str) -> String {
+        Expr::parse(src)
+            .unwrap()
+            .eval(&json!({}))
+            .expect_err(src)
+            .message
     }
 
     #[test]
     fn minor_to_major_keeps_whole_amounts_integral() {
-        assert_eq!(call("minor_to_major", json!(1000), &[]).unwrap(), json!(10));
-        assert_eq!(
-            call("minor_to_major", json!(1050), &[]).unwrap(),
-            json!(10.5)
-        );
-        // JPY-style zero-exponent currency
-        assert_eq!(
-            call("minor_to_major", json!(1000), &[json!(0)]).unwrap(),
-            json!(1000)
-        );
+        assert_eq!(ev("1000 | minor_to_major"), Some(json!(10)));
+        assert_eq!(ev("1050 | minor_to_major"), Some(json!(10.5)));
+        assert!(err("10.5 | minor_to_major").contains("whole number"));
     }
 
     #[test]
     fn major_to_minor_rounds() {
-        assert_eq!(
-            call("major_to_minor", json!(10.5), &[]).unwrap(),
-            json!(1050)
-        );
-        assert_eq!(
-            call("major_to_minor", json!(10.005), &[]).unwrap(),
-            json!(1001)
-        );
-        assert_eq!(call("major_to_minor", json!(-1), &[]).unwrap(), json!(0));
+        assert_eq!(ev("10.5 | major_to_minor"), Some(json!(1050)));
+        assert_eq!(ev("10.005 | major_to_minor"), Some(json!(1001)));
+        assert_eq!(ev("-1 | major_to_minor"), Some(json!(0)));
     }
 
     #[test]
     fn money_round_trips() {
         for minor in [1u64, 99, 100, 1000, 123456] {
-            let major = call("minor_to_major", json!(minor), &[]).unwrap();
-            assert_eq!(call("major_to_minor", major, &[]).unwrap(), json!(minor));
+            let major = ev(&format!("{minor} | minor_to_major")).unwrap();
+            assert_eq!(ev(&format!("{major} | major_to_minor")), Some(json!(minor)));
         }
     }
 
     #[test]
-    fn join_skips_absent_and_yields_null_when_empty() {
+    fn join_skips_absent_and_is_absent_when_empty() {
         assert_eq!(
-            call("join", json!(["John", "Doe"]), &[json!(" ")]).unwrap(),
-            json!("John Doe")
+            ev("['Satoru', 'Gojo'] | join(' ')"),
+            Some(json!("Satoru Gojo"))
         );
         // A missing first name must not leave a leading space.
-        assert_eq!(
-            call("join", json!([null, "Doe"]), &[json!(" ")]).unwrap(),
-            json!("Doe")
-        );
-        assert_eq!(
-            call("join", json!(["", ""]), &[json!(" ")]).unwrap(),
-            Value::Null
-        );
+        assert_eq!(ev("[nope, 'Gojo'] | join(' ')"), Some(json!("Gojo")));
+        assert_eq!(ev("['', ''] | join(' ')"), None);
     }
 
     #[test]
-    fn absent_input_short_circuits() {
-        assert_eq!(call("trim", Value::Null, &[]).unwrap(), Value::Null);
-        assert_eq!(call("upper", json!(""), &[]).unwrap(), Value::Null);
+    fn blank_input_short_circuits() {
+        assert_eq!(ev("nope | trim"), None);
+        assert_eq!(ev("'' | upper"), None);
+        assert_eq!(ev("'  ' | trim | upper"), None);
         // `default` is the one builtin that must see absence.
-        assert_eq!(
-            call("default", Value::Null, &[json!("x")]).unwrap(),
-            json!("x")
-        );
+        assert_eq!(ev("nope | default('x')"), Some(json!("x")));
+        assert_eq!(ev("'' | default('x')"), Some(json!("x")));
     }
 
     #[test]
     fn null_if_strips_sentinels() {
+        assert_eq!(ev("'_blank_' | null_if('_blank_')"), None);
+        assert_eq!(ev("'Mpesa' | null_if('_blank_')"), Some(json!("Mpesa")));
         assert_eq!(
-            call("null_if", json!("_blank_"), &[json!("_blank_")]).unwrap(),
-            Value::Null
-        );
-        assert_eq!(
-            call("null_if", json!("Mpesa"), &[json!("_blank_")]).unwrap(),
-            json!("Mpesa")
+            ev("('_blank_' | null_if('_blank_')) ?? 'fallback'"),
+            Some(json!("fallback"))
         );
     }
 
     #[test]
     fn map_falls_back_to_default() {
-        let table = json!({"Success": "approved", "Failed": "declined", "_default": "pending"});
-        assert_eq!(
-            call("map", json!("Success"), &[table.clone()]).unwrap(),
-            json!("approved")
-        );
-        assert_eq!(
-            call("map", json!("Weird"), &[table]).unwrap(),
-            json!("pending")
-        );
-        // No `_default` and no hit is null, not an error.
-        assert_eq!(
-            call("map", json!("Weird"), &[json!({"a": 1})]).unwrap(),
-            Value::Null
-        );
-    }
-
-    #[test]
-    fn digests_match_known_vectors() {
-        assert_eq!(
-            call("sha256", json!("abc"), &[]).unwrap(),
-            json!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-        );
-        assert_eq!(
-            call("md5", json!("abc"), &[]).unwrap(),
-            json!("900150983cd24fb0d6963f7d28e17f72")
-        );
-        // RFC 4231 test case 1
-        assert_eq!(
-            call("hmac_sha256", json!("Hi There"), &[json!("\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b")]).unwrap(),
-            json!("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
-        );
-    }
-
-    #[test]
-    fn encodings() {
-        assert_eq!(
-            call("base64", json!("hello"), &[]).unwrap(),
-            json!("aGVsbG8=")
-        );
-        assert_eq!(
-            call("base64url", json!("hello"), &[]).unwrap(),
-            json!("aGVsbG8")
-        );
-        assert_eq!(call("hex", json!("hi"), &[]).unwrap(), json!("6869"));
+        const T: &str = r#"| map({"Success": "approved", "_default": "pending"})"#;
+        assert_eq!(ev(&format!("'Success' {T}")), Some(json!("approved")));
+        assert_eq!(ev(&format!("'Weird' {T}")), Some(json!("pending")));
+        // No `_default` and no hit is absent, not an error.
+        assert_eq!(ev(r#"'Weird' | map({"a": 1})"#), None);
+        assert!(err("'x' | map('nope')").contains("expected object"));
     }
 
     #[test]
     fn string_helpers() {
-        assert_eq!(
-            call("substr", json!("abcdef"), &[json!(1), json!(3)]).unwrap(),
-            json!("bcd")
-        );
-        assert_eq!(
-            call("substr", json!("abc"), &[json!(10)]).unwrap(),
-            Value::Null
-        );
-        assert_eq!(
-            call("replace", json!("a-b-c"), &[json!("-"), json!("")]).unwrap(),
-            json!("abc")
-        );
-        assert_eq!(
-            call("pad_start", json!(7), &[json!(3), json!("0")]).unwrap(),
-            json!("007")
-        );
-        assert_eq!(
-            call("split", json!("a,b"), &[json!(",")]).unwrap(),
-            json!(["a", "b"])
-        );
+        assert_eq!(ev("'abcdef' | substr(2)"), Some(json!("cdef")));
+        assert_eq!(ev("'abc' | substr(10)"), None);
+        assert_eq!(ev("'a-b-c' | replace('-', '')"), Some(json!("abc")));
+        assert_eq!(ev("7 | pad_start(3, '0')"), Some(json!("007")));
+        assert_eq!(ev("'a,b' | split(',')"), Some(json!(["a", "b"])));
+        assert!(err("'a' | pad_start(-1, '0')").contains("non-negative"));
+    }
+
+    #[test]
+    fn a_number_reaches_a_text_builtin() {
+        assert_eq!(ev("1000 | to_string"), Some(json!("1000")));
+        assert_eq!(ev("'10' | to_number"), Some(json!(10)));
+        assert_eq!(ev("'42' | sha256"), ev("42 | sha256"));
     }
 
     #[test]
     fn arrays_and_objects_are_not_scalars() {
-        let err = call("trim", json!([1, 2]), &[]).unwrap_err();
-        assert!(err.contains("array"), "{err}");
+        assert!(err("[1, 2] | trim").contains("scalar"));
+        assert!(err(r#"{"a": 1} | upper"#).contains("scalar"));
+    }
+
+    #[test]
+    fn a_failing_builtin_names_itself() {
+        assert!(err("'x' | to_number").starts_with("to_number:"));
     }
 }

@@ -4,11 +4,8 @@ use serde::{Deserialize, Serialize};
 
 /// The only three outcomes the platform understands.
 ///
-/// The mapping from a gateway's own vocabulary onto these is per-integration
-/// configuration; the one rule that is not configurable is that an *uncertain*
-/// failure — a transport error, a 5xx, an unparseable body — must become
-/// [`Status::Pending`] and never [`Status::Declined`], because the gateway may
-/// have taken the money.
+/// uncertain failure: a transport error, a 5xx, an unparseable body must become [`Status::Pending`]
+/// because the gateway may have taken the money.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -34,7 +31,7 @@ impl Status {
 
     /// Whether the transaction has reached a terminal state.
     pub fn is_final(self) -> bool {
-        !matches!(self, Status::Pending)
+        self != Self::Pending
     }
 }
 

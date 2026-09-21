@@ -1,13 +1,9 @@
-//! The interaction log returned inline to reactivepay.
-//!
-//! Every outbound call produces exactly one entry — auth requests included —
-//! because the engine, not the spec, opens the span. A spec cannot describe a
-//! request that goes unlogged.
+//! The interaction log returned inline to reactivepay. Every outbound call
+//! produces exactly one entry, auth requests included.
 
 use std::time::Instant;
 
 use serde_json::{Map, Value};
-use time::OffsetDateTime;
 
 pub use connect::{InteractionLog, LoggedRequest};
 
@@ -15,7 +11,6 @@ pub use connect::{InteractionLog, LoggedRequest};
 /// failure to build one is still timed and reported.
 pub struct InteractionSpan {
     started: Instant,
-    created_at: OffsetDateTime,
     request: Option<LoggedRequest>,
     status: Option<u16>,
     response: Option<Value>,
@@ -25,7 +20,6 @@ impl InteractionSpan {
     pub fn enter() -> Self {
         Self {
             started: Instant::now(),
-            created_at: OffsetDateTime::now_utc(),
             request: None,
             status: None,
             response: None,
@@ -60,18 +54,14 @@ impl InteractionSpan {
             }),
             status: self.status,
             response: self.response.as_ref().map(|r| redactor.redact(r)),
-            created_at: self.created_at,
             duration: self.started.elapsed().as_secs_f32(),
         }
     }
 }
 
-/// Replaces secret settings values wherever they appear in a log entry.
-///
-/// Credentials arrive per-request and flow into request bodies, headers and
-/// occasionally back out in an error message. Logs travel to the platform and
-/// into storage, so the values are masked on the way out. Matching is by
-/// value, which is why the settings schema has to mark fields `secret`.
+/// Replaces secret settings values wherever they appear in a log entry. Logs
+/// travel to the platform and into storage. Matching is by value, which is why
+/// the settings schema has to mark fields `secret`.
 #[derive(Debug, Clone, Default)]
 pub struct Redactor {
     secrets: Vec<String>,

@@ -1,54 +1,43 @@
 //! The integration document.
-//!
-//! One [`Integration`] describes how to talk to one external gateway. It is
-//! stored as a single JSON document, edited as a whole, and versioned on every
-//! save. Nothing in it is credentials: those arrive per-request from
-//! reactivepay in the `settings` bucket and are never persisted.
-//!
-//! ```text
-//! Integration
-//! ├── settings : SettingsSchema      what reactivepay sends in `settings`
-//! ├── auths    : [AuthDef]           shared, referenced by id, token-cached
-//! └── methods  : {pay,payout,refund,status}
-//!                └── requests : [RequestDef]   run in order
-//!                └── result   : ResultMapping  the reply to reactivepay
-//! ```
 
 pub mod auth;
+pub mod callback;
 pub mod expr;
 pub mod request;
 pub mod settings;
-pub mod template;
 pub mod validate;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-pub use connect::{Manifest, MethodKind, Status};
+pub use connect::{Iframe, Manifest, MethodKind, RedirectRequest, Status};
 
 pub use auth::{AuthDef, AuthId, AuthKind};
+pub use callback::{AckDef, CallbackDef};
 pub use expr::{EvalError, Expr, ExprError};
-pub use request::{Body, Condition, HttpMethod, NameValue, OnError, RequestDef, ResponseSpec};
+pub use request::{Body, Envelope, HttpMethod, NameValue, OnError, RequestDef, ResponseSpec};
 pub use settings::{FieldDef, FieldType, SettingsSchema};
-pub use template::{JsonTemplate, Template};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Integration {
-    /// URL segment and platform `gateway_key`, e.g. `scripay`.
+    /// URL segment for the integration
     pub key: String,
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
     /// Prefix for every request path. May branch on `settings.sandbox`.
-    pub base_url: Template,
+    pub base_url: Expr,
     #[serde(default)]
     pub settings: SettingsSchema,
     #[serde(default)]
     pub auths: Vec<AuthDef>,
     #[serde(default)]
     pub methods: BTreeMap<MethodKind, MethodDef>,
+    /// How the gateway's asynchronous callback is read and forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback: Option<CallbackDef>,
 }
 
 impl Integration {
@@ -60,16 +49,35 @@ impl Integration {
         self.methods.get(&kind).filter(|m| m.enabled)
     }
 
-    /// The platform's `params_fields` manifest for one method, derived from
-    /// the paths the method's expressions actually read. Keeps the
-    /// registration payload honest instead of hand-maintained.
+    pub fn callback(&self) -> Option<&CallbackDef> {
+        self.callback.as_ref().filter(|c| c.enabled)
+    }
+
+    /// Should we store the additional context for callback?
+    pub fn stores_callback_context(&self, kind: MethodKind) -> bool {
+        matches!(kind, MethodKind::Pay | MethodKind::Payout) && self.callback().is_some()
+    }
+
+    /// Generate gc settings from the integration based on field usage
     pub fn manifest(&self, kind: MethodKind) -> Option<Manifest> {
         let method = self.methods.get(&kind)?;
         let mut exprs = Vec::new();
         method.collect_exprs(self, &mut exprs);
+        let mut payment = first_segments(&exprs, "payment");
+        // The callback forward is signed with it, so the platform has to send
+        // it even though no expression reads it.
+        if self.stores_callback_context(kind) {
+            for field in ["token", "merchant_private_key"] {
+                if !payment.iter().any(|p| p == field) {
+                    payment.push(field.to_string());
+                }
+            }
+            payment.sort();
+        }
         Some(Manifest {
-            payment: first_segments(&exprs, "payment"),
+            payment,
             params: first_segments(&exprs, "params"),
+            refund: first_segments(&exprs, "refund"),
             settings: self.settings.manifest(),
         })
     }
@@ -77,36 +85,14 @@ impl Integration {
 
 fn first_segments(exprs: &[&Expr], root: &str) -> Vec<String> {
     let mut out = BTreeSet::new();
-    for e in exprs {
-        collect_first_segments(e.node(), root, &mut out);
+    for path in exprs.iter().flat_map(|e| e.paths()) {
+        if let [r, first, ..] = path.as_slice() {
+            if r == root {
+                out.insert(first.clone());
+            }
+        }
     }
     out.into_iter().collect()
-}
-
-fn collect_first_segments(node: &expr::Node, root: &str, out: &mut BTreeSet<String>) {
-    use expr::parse::Seg;
-    match node {
-        expr::Node::Path { root: r, segs, .. } if r == root => {
-            if let Some(Seg::Key(k)) = segs.first() {
-                out.insert(k.clone());
-            }
-        }
-        expr::Node::Path { .. } | expr::Node::Literal(_) => {}
-        expr::Node::Array(items) | expr::Node::Coalesce(items) => items
-            .iter()
-            .for_each(|n| collect_first_segments(n, root, out)),
-        expr::Node::Object(fields) => fields
-            .iter()
-            .for_each(|(_, n)| collect_first_segments(n, root, out)),
-        expr::Node::Pipe { input, calls } => {
-            collect_first_segments(input, root, out);
-            for c in calls {
-                c.args
-                    .iter()
-                    .for_each(|n| collect_first_segments(n, root, out));
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,13 +100,13 @@ fn collect_first_segments(node: &expr::Node, root: &str, out: &mut BTreeSet<Stri
 pub struct MethodDef {
     #[serde(default = "yes")]
     pub enabled: bool,
-    /// Executed in order. Each sees `steps.<name>` for every earlier request.
+    /// Executed in order
     #[serde(default)]
     pub requests: Vec<RequestDef>,
     pub result: ResultMapping,
 }
 
-fn yes() -> bool {
+pub(crate) fn yes() -> bool {
     true
 }
 
@@ -129,8 +115,7 @@ impl MethodDef {
         self.requests.iter().find(|r| r.name == name)
     }
 
-    /// Every expression reachable from this method, including those inside the
-    /// auth definitions its requests reference.
+    /// Every expression reachable from this method, auth included.
     pub fn collect_exprs<'a>(&'a self, integration: &'a Integration, out: &mut Vec<&'a Expr>) {
         let mut seen_auth: BTreeSet<&AuthId> = BTreeSet::new();
         for req in &self.requests {
@@ -146,14 +131,12 @@ fn collect_request_exprs<'a>(
     out: &mut Vec<&'a Expr>,
     seen_auth: &mut BTreeSet<&'a AuthId>,
 ) {
-    out.extend(req.templates().into_iter().flat_map(|t| t.exprs()));
+    out.extend(req.exprs());
     if let Some(e) = &req.run_if {
         out.push(e);
     }
-    req.response.success_when.exprs(out);
-    if let Some(t) = &req.response.success {
-        out.extend(t.templates().into_iter().flat_map(|t| t.exprs()));
-    }
+    out.extend(req.response.success_when.iter());
+    out.extend(req.response.success.iter());
     out.extend(req.response.error.message.iter());
     out.extend(req.response.error.code.iter());
 
@@ -173,9 +156,9 @@ fn collect_request_exprs<'a>(
             out.push(username);
             out.push(password);
         }
-        AuthKind::Header { value, .. } | AuthKind::Query { value, .. } => out.extend(value.exprs()),
+        AuthKind::Header { value, .. } | AuthKind::Query { value, .. } => out.push(value),
         AuthKind::Signature(sig) => {
-            out.extend(sig.canonical.exprs());
+            out.push(&sig.canonical);
             out.extend(sig.secret.iter());
         }
         AuthKind::TokenRequest(tr) => {
@@ -201,6 +184,10 @@ pub struct ResultMapping {
     pub currency: Option<Expr>,
     #[serde(default)]
     pub details: Option<Expr>,
+    #[serde(default)]
+    pub redirect_request: Option<RedirectDef>,
+    #[serde(default)]
+    pub requisites: Option<Expr>,
 }
 
 impl ResultMapping {
@@ -210,7 +197,69 @@ impl ResultMapping {
         out.extend(self.amount.iter());
         out.extend(self.currency.iter());
         out.extend(self.details.iter());
+        if let Some(r) = &self.redirect_request {
+            out.extend(r.exprs());
+        }
+        out.extend(self.requisites.iter());
     }
+}
+
+/// The authored form of [`RedirectRequest`]: the same variants, with
+/// expressions where the contract has strings. An absent url drops the whole
+/// block, so one document serves both a hosted checkout and a straight-through
+/// charge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RedirectDef {
+    Post {
+        url: Expr,
+        #[serde(default = "Expr::empty_object")]
+        params: Expr,
+    },
+    Get {
+        url: Expr,
+    },
+    GetWithProcessing {
+        url: Expr,
+    },
+    PostIframes {
+        iframes: Vec<IframeDef>,
+    },
+    RedirectHtml {
+        html: Expr,
+    },
+}
+
+impl RedirectDef {
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match self {
+            RedirectDef::Post { url, params } => vec![url, params],
+            RedirectDef::Get { url } | RedirectDef::GetWithProcessing { url } => vec![url],
+            RedirectDef::PostIframes { iframes } => {
+                iframes.iter().flat_map(|f| [&f.url, &f.data]).collect()
+            }
+            RedirectDef::RedirectHtml { html } => vec![html],
+        }
+    }
+
+    /// The `type` tag, for the editor's kind picker.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            RedirectDef::Post { .. } => "post",
+            RedirectDef::Get { .. } => "get",
+            RedirectDef::GetWithProcessing { .. } => "get_with_processing",
+            RedirectDef::PostIframes { .. } => "post_iframes",
+            RedirectDef::RedirectHtml { .. } => "redirect_html",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IframeDef {
+    pub url: Expr,
+    #[serde(default = "Expr::empty_object")]
+    pub data: Expr,
 }
 
 #[cfg(test)]
@@ -218,14 +267,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_result_carries_a_redirect_and_requisites_through_a_round_trip() {
+        const RESULT: &str = r#"{
+            "status": "\"pending\"",
+            "redirect_request": { "type": "get_with_processing",
+                                  "url": "steps.c.body.pay_url" },
+            "requisites": "{\"account\": steps.c.body.account}"
+        }"#;
+        let r: ResultMapping = serde_json::from_str(RESULT).unwrap();
+        assert_eq!(
+            r.redirect_request.as_ref().map(RedirectDef::tag),
+            Some("get_with_processing")
+        );
+        let back: ResultMapping =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(r, back);
+
+        // Both reach validation and the manifest through the usual walk.
+        let mut exprs = Vec::new();
+        r.exprs(&mut exprs);
+        let paths: Vec<Vec<String>> = exprs.iter().flat_map(|e| e.paths()).collect();
+        assert!(paths.contains(&vec![
+            "steps".to_string(),
+            "c".to_string(),
+            "body".to_string(),
+            "pay_url".to_string()
+        ]));
+        assert!(paths.contains(&vec![
+            "steps".to_string(),
+            "c".to_string(),
+            "body".to_string(),
+            "account".to_string()
+        ]));
+    }
+
+    #[test]
     fn manifest_is_derived_from_the_document() {
         let d: Integration = serde_json::from_str(
             r#"{
-                "key": "g", "name": "G", "base_url": "https://x.example",
+                "key": "g", "name": "G", "base_url": "'https://x.example'",
                 "settings": { "fields": [{ "name": "client_id" }] },
                 "methods": { "status": {
-                    "requests": [{ "name": "s", "path": "/s/{{ payment.gateway_token }}" }],
-                    "result": { "status": "'pending'" } } }
+                    "requests": [{ "name": "s", "path": "'/s/' + payment.gateway_token" }],
+                    "result": { "status": "\"pending\"" } } }
             }"#,
         )
         .unwrap();
@@ -234,5 +318,28 @@ mod tests {
         assert!(m.params.is_empty());
         assert_eq!(m.settings, ["client_id"]);
         assert!(d.manifest(MethodKind::Refund).is_none());
+    }
+
+    #[test]
+    fn a_callback_asks_the_platform_for_the_merchant_key_on_pay() {
+        let d: Integration = serde_json::from_str(
+            r#"{
+                "key": "g", "name": "G", "base_url": "'https://x.example'",
+                "methods": {
+                    "pay": { "requests": [{ "name": "c", "path": "'/c'" }],
+                             "result": { "status": "\"pending\"" } },
+                    "status": { "requests": [{ "name": "s", "path": "'/s'" }],
+                                "result": { "status": "\"pending\"" } } },
+                "callback": { "lookup": "callback.body.id",
+                              "result": { "status": "\"approved\"", "amount": "callback.body.a",
+                                          "currency": "callback.body.c" } }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            d.manifest(MethodKind::Pay).unwrap().payment,
+            ["merchant_private_key", "token"]
+        );
+        assert!(d.manifest(MethodKind::Status).unwrap().payment.is_empty());
     }
 }

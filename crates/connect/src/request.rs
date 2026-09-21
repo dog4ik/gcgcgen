@@ -3,18 +3,17 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The three buckets reactivepay sends on every call.
+/// The buckets reactivepay sends on every call.
 ///
 /// The buckets stay untyped here on purpose: which keys appear in each is
 /// per-integration configuration, declared by the integration's settings
 /// schema and published to the platform as a [`crate::Manifest`].
-///
-/// `settings` carries the merchant's credentials. They are supplied fresh on
-/// every request and this service never stores them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConnectInput {
     #[serde(default)]
     pub payment: Value,
+    #[serde(default)]
+    pub refund: Value,
     #[serde(default)]
     pub params: Value,
     #[serde(default)]
@@ -27,7 +26,7 @@ impl ConnectInput {
         self.settings.get(name)
     }
 
-    /// The platform's payment identifier, used for correlation and logging.
+    /// The platform's payment identifier
     pub fn token(&self) -> Option<&str> {
         self.payment.get("token")?.as_str()
     }

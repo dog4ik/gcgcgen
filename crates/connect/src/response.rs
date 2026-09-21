@@ -1,6 +1,7 @@
 //! The outbound response envelope.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::log::InteractionLog;
 use crate::status::Status;
@@ -9,10 +10,7 @@ use crate::status::Status;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransactionResponse {
     pub status: Status,
-    /// The gateway's own identifier for the transaction.
-    ///
-    /// Deliberately absent on an uncertain outcome: if the call may not have
-    /// reached the gateway there is no identifier to report.
+    /// The gateway's identifier for the transaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_token: Option<String>,
     /// Minor units.
@@ -22,6 +20,40 @@ pub struct TransactionResponse {
     pub currency: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_request: Option<RedirectRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requisites: Option<Map<String, Value>>,
+}
+
+/// The handover to the gateway's own page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RedirectRequest {
+    Post {
+        url: String,
+        #[serde(default)]
+        params: Map<String, Value>,
+    },
+    Get {
+        url: String,
+    },
+    GetWithProcessing {
+        url: String,
+    },
+    PostIframes {
+        iframes: Vec<Iframe>,
+    },
+    RedirectHtml {
+        html: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Iframe {
+    pub url: String,
+    #[serde(default)]
+    pub data: Map<String, Value>,
 }
 
 impl TransactionResponse {
@@ -32,18 +64,14 @@ impl TransactionResponse {
             amount: None,
             currency: None,
             details: None,
+            redirect_request: None,
+            requisites: None,
         }
     }
 
     /// The reply for a call whose outcome could not be determined.
     pub fn uncertain(details: impl Into<String>) -> Self {
-        Self {
-            status: Status::Pending,
-            gateway_token: None,
-            amount: None,
-            currency: None,
-            details: Some(details.into()),
-        }
+        Self::new(Status::Pending).with_details(details)
     }
 
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
@@ -54,9 +82,7 @@ impl TransactionResponse {
 
 /// What the platform receives.
 ///
-/// **Always sent with HTTP 200**, including failures: a non-200 is treated as
-/// a transport problem and retried rather than recorded, so an integration
-/// error has to arrive as `{"result": false, …}` with a 200 status.
+/// Response should always be sent with HTTP 200
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ConnectResponse {
@@ -119,11 +145,10 @@ mod tests {
     fn success_flattens_the_transaction() {
         let r = ConnectResponse::success(
             TransactionResponse {
-                status: Status::Pending,
                 gateway_token: Some("rrn-1".into()),
                 amount: Some(1000),
                 currency: Some("KES".into()),
-                details: None,
+                ..TransactionResponse::new(Status::Pending)
             },
             vec![],
         );
@@ -143,6 +168,61 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v, json!({"result": true, "logs": [], "status": "approved"}));
         assert!(v.get("gateway_token").is_none());
+    }
+
+    #[test]
+    fn a_redirect_is_tagged_by_type() {
+        let r = ConnectResponse::success(
+            TransactionResponse {
+                redirect_request: Some(RedirectRequest::Post {
+                    url: "https://pay.example/hosted".into(),
+                    params: json!({"order": "ORD1"}).as_object().unwrap().clone(),
+                }),
+                requisites: Some(
+                    json!({"account": "0011", "bank": "KCB"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+                ..TransactionResponse::new(Status::Pending)
+            },
+            vec![],
+        );
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            v["redirect_request"],
+            json!({"type": "post", "url": "https://pay.example/hosted",
+                   "params": {"order": "ORD1"}})
+        );
+        assert_eq!(v["requisites"], json!({"account": "0011", "bank": "KCB"}));
+    }
+
+    #[test]
+    fn redirect_variants_use_the_platform_spelling() {
+        let tags = [
+            RedirectRequest::Get { url: "u".into() },
+            RedirectRequest::GetWithProcessing { url: "u".into() },
+            RedirectRequest::PostIframes {
+                iframes: vec![Iframe {
+                    url: "u".into(),
+                    data: Map::new(),
+                }],
+            },
+            RedirectRequest::RedirectHtml {
+                html: "<form/>".into(),
+            },
+        ]
+        .map(|r| serde_json::to_value(r).unwrap()["type"].clone());
+        assert_eq!(
+            tags,
+            [
+                "get",
+                "get_with_processing",
+                "post_iframes",
+                "redirect_html"
+            ]
+            .map(|s| json!(s))
+        );
     }
 
     #[test]

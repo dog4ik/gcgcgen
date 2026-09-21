@@ -1,11 +1,9 @@
-//! Server functions backing the editor UI.
-//!
-//! Validation is *not* here: [`crate::spec::validate`] is pure and compiles to
-//! wasm, so the editor checks a document as it is typed without a round trip.
-//! These calls are the ones that genuinely need the server — storage, and the
-//! dry run that needs `env` to be filled in the same way a real call would.
+//! Server functions backing the editor UI: the calls that genuinely need the
+//! server. Validation is not one — [`crate::spec::validate`] compiles to wasm
+//! and runs in the editor as the document is typed.
 
 use leptos::prelude::*;
+use leptos::server_fn::codec::Json;
 
 use connect::{ConnectInput, MethodKind};
 
@@ -37,7 +35,10 @@ pub async fn load_integration(key: String) -> Result<Integration, ServerFnError>
 }
 
 /// Validates and stores, returning the new version number.
-#[server]
+///
+/// `input = Json`, not the default `PostUrl`: in a urlencoded body every leaf
+/// is a string, so `default_ttl_secs: u64` arrives as `"3600"` and fails.
+#[server(input = Json)]
 pub async fn save_integration(
     doc: Integration,
     note: Option<String>,
@@ -76,9 +77,11 @@ pub async fn rollback_integration(key: String, version: i64) -> Result<i64, Serv
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
-/// Renders one request against sample input. Nothing is sent: this is the
-/// same code path the golden mapping tests assert against.
-#[server]
+/// Renders one request against sample input, sending nothing: the same code
+/// path the golden mapping tests assert against.
+///
+/// `input = Json` for the same reason as [`save_integration`].
+#[server(input = Json)]
 pub async fn preview_request(
     doc: Integration,
     method: MethodKind,

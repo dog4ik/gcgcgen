@@ -1,7 +1,5 @@
-//! DTOs shared between the server and the browser.
-//!
-//! These cross the server-function boundary, so they must compile for both
-//! `ssr` and `hydrate` — no database or HTTP types here.
+//! DTOs shared between the server and the browser: they compile for both
+//! `ssr` and `hydrate`, so no database or HTTP types here.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

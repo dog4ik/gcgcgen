@@ -1,5 +1,3 @@
-//! The integration index.
-
 use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::use_navigate;
@@ -174,33 +172,31 @@ pub fn MethodChip(kind: MethodKind) -> impl IntoView {
     }
 }
 
-/// A minimal but *valid* document, so a new integration opens in the editor
-/// already passing validation rather than covered in errors.
+/// A minimal but valid document
 pub fn starter() -> Integration {
     let key = "new-integration";
     serde_json::from_value(serde_json::json!({
         "key": key,
         "name": "New integration",
-        "base_url": "https://api.example.com",
+        "base_url": "'https://api.example.com'",
         "settings": { "fields": [
-            { "name": "api_key", "label": "API key", "required": true, "secret": true }
+            { "name": "api_key", "required": true, "secret": true }
         ] },
         "auths": [],
         "methods": { "pay": {
             "requests": [{
-                "name": "charge",
+                "name": "pay",
                 "method": "post",
-                "path": "/v1/charges",
-                "body": { "kind": "json", "template": {
-                    "reference": "{{ payment.token }}",
-                    "amount": "{{ payment.gateway_amount | minor_to_major }}",
-                    "currency": "{{ payment.gateway_currency }}"
-                } },
+                "path": "'/v1/pay'",
+                "body": { "kind": "json", "expr":
+                    "{\"reference\": payment.token,
+                      \"amount\": payment.gateway_amount | minor_to_major,
+                      \"currency\": payment.gateway_currency}" },
                 "response": { "error": { "message": "resp.body.message" } }
             }],
             "result": {
-                "status": "'pending'",
-                "gateway_token": "steps.charge.body.id"
+                "status": "\"pending\"",
+                "gateway_token": "steps.pay.body.id"
             }
         } }
     }))

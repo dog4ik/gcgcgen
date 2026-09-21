@@ -1,9 +1,3 @@
-//! Auth resolution: the token cache, and placing credentials on a request.
-//!
-//! [`AuthKind::TokenRequest`] is executed by the executor (it needs to send a
-//! request); everything here is the surrounding machinery — cache keys,
-//! expiry, and where the resulting credential goes.
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -18,13 +12,7 @@ use super::scope::Scope;
 use crate::spec::auth::{SigAlg, SigEncoding, SigPlacement, SignatureAuth, TokenPlacement};
 use crate::spec::{AuthId, AuthKind};
 
-/// Cached gateway tokens, partitioned by integration, auth definition, and a
-/// digest of the auth's `cache_key` expressions.
-///
-/// The settings-derived component is what stops two merchants on the same
-/// integration from sharing a token; [`crate::spec::validate`] refuses to save
-/// an auth whose `cache_key` is empty. The key is hashed rather than stored
-/// verbatim so credentials never sit in the map's keys.
+/// Cached gateway tokens
 #[derive(Debug, Default)]
 pub struct TokenStore {
     inner: Mutex<HashMap<String, Entry>>,
@@ -33,7 +21,6 @@ pub struct TokenStore {
 #[derive(Debug, Clone)]
 struct Entry {
     token: String,
-    /// Already adjusted by the auth's refresh buffer.
     usable_until: Instant,
 }
 
@@ -50,8 +37,6 @@ impl TokenStore {
         (entry.usable_until > Instant::now()).then(|| entry.token.clone())
     }
 
-    /// `ttl` is the gateway's stated lifetime; `refresh_buffer` is subtracted
-    /// so a token is replaced before it expires mid-flight.
     pub fn insert(&self, key: String, token: String, ttl: Duration, refresh_buffer: Duration) {
         let usable = ttl.saturating_sub(refresh_buffer);
         let mut map = self.inner.lock().expect("token store poisoned");
@@ -70,14 +55,6 @@ impl TokenStore {
 
     pub fn invalidate(&self, key: &str) {
         self.inner.lock().expect("token store poisoned").remove(key);
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.lock().expect("token store poisoned").len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 
@@ -113,30 +90,29 @@ pub fn apply_inline(prepared: &mut Prepared, kind: &AuthKind, scope: &Scope) -> 
         AuthKind::None | AuthKind::TokenRequest(_) => Ok(()),
 
         AuthKind::Bearer { token } => {
-            let token = token.eval(&value)?;
-            if let Some(t) = as_text(&token) {
+            if let Some(t) = token.eval_text(&value)? {
                 prepared.set_header("authorization", format!("Bearer {t}"));
             }
             Ok(())
         }
 
         AuthKind::Basic { username, password } => {
-            let u = as_text(&username.eval(&value)?).unwrap_or_default();
-            let p = as_text(&password.eval(&value)?).unwrap_or_default();
+            let u = username.eval_text(&value)?.unwrap_or_default();
+            let p = password.eval_text(&value)?.unwrap_or_default();
             let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"));
             prepared.set_header("authorization", format!("Basic {encoded}"));
             Ok(())
         }
 
-        AuthKind::Header { name, value: tpl } => {
-            if let Some(v) = tpl.render_string(&value)? {
+        AuthKind::Header { name, value: e } => {
+            if let Some(v) = e.eval_text(&value)? {
                 prepared.set_header(name, v);
             }
             Ok(())
         }
 
-        AuthKind::Query { name, value: tpl } => {
-            if let Some(v) = tpl.render_string(&value)? {
+        AuthKind::Query { name, value: e } => {
+            if let Some(v) = e.eval_text(&value)? {
                 prepared.set_query(name, v);
             }
             Ok(())
@@ -150,10 +126,10 @@ pub fn apply_inline(prepared: &mut Prepared, kind: &AuthKind, scope: &Scope) -> 
 /// path, query and body via the `req` root.
 pub fn apply_signature(prepared: &mut Prepared, sig: &SignatureAuth, scope: &Scope) -> Result<()> {
     let req_scope = scope.with_req(prepared.req_scope());
-    let canonical = sig.canonical.render_string(&req_scope)?.unwrap_or_default();
+    let canonical = sig.canonical.eval_text(&req_scope)?.unwrap_or_default();
 
     let secret = match &sig.secret {
-        Some(e) => as_text(&e.eval(&req_scope)?).unwrap_or_default(),
+        Some(e) => e.eval_text(&req_scope)?.unwrap_or_default(),
         None => String::new(),
     };
     if sig.algorithm.needs_secret() && secret.is_empty() {
@@ -206,16 +182,6 @@ fn compute(alg: SigAlg, message: &[u8], secret: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-pub(crate) fn as_text(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) if s.is_empty() => None,
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        Value::Bool(b) => Some(b.to_string()),
-        Value::Null | Value::Array(_) | Value::Object(_) => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +208,7 @@ mod tests {
                 payment: json!({"token": "tok_1"}),
                 params: json!({}),
                 settings: json!({"user": "u", "pass": "p", "api_secret": "shhh", "tok": "T"}),
+                ..Default::default()
             },
             &env(),
             MethodKind::Pay,
@@ -294,7 +261,7 @@ mod tests {
 
     #[test]
     fn bearer_and_basic_set_authorization() {
-        let mut p = prepared(r#"{"name":"c","path":"/p"}"#);
+        let mut p = prepared(r#"{"name":"c","path":"'/p'"}"#);
         apply_inline(
             &mut p,
             &AuthKind::Bearer {
@@ -305,7 +272,7 @@ mod tests {
         .unwrap();
         assert_eq!(p.headers, vec![("authorization".into(), "Bearer T".into())]);
 
-        let mut p = prepared(r#"{"name":"c","path":"/p"}"#);
+        let mut p = prepared(r#"{"name":"c","path":"'/p'"}"#);
         apply_inline(
             &mut p,
             &AuthKind::Basic {
@@ -324,11 +291,11 @@ mod tests {
 
     #[test]
     fn token_placements() {
-        let mut p = prepared(r#"{"name":"c","path":"/p"}"#);
+        let mut p = prepared(r#"{"name":"c","path":"'/p'"}"#);
         place_token(&mut p, &TokenPlacement::Bearer, "T");
         assert_eq!(p.headers[0].1, "Bearer T");
 
-        let mut p = prepared(r#"{"name":"c","path":"/p"}"#);
+        let mut p = prepared(r#"{"name":"c","path":"'/p'"}"#);
         place_token(
             &mut p,
             &TokenPlacement::Header {
@@ -339,7 +306,7 @@ mod tests {
         );
         assert_eq!(p.headers[0], ("X-Token".to_string(), "tok T".to_string()));
 
-        let mut p = prepared(r#"{"name":"c","path":"/p"}"#);
+        let mut p = prepared(r#"{"name":"c","path":"'/p'"}"#);
         place_token(
             &mut p,
             &TokenPlacement::Query {
@@ -353,7 +320,7 @@ mod tests {
     #[test]
     fn signature_covers_the_rendered_request() {
         let sig: SignatureAuth = serde_json::from_str(
-            r#"{"canonical": "{{ req.method }}{{ req.path }}{{ req.body_raw }}",
+            r#"{"canonical": "concat([req.method, req.path, req.body_raw])",
                 "algorithm": "hmac_sha256",
                 "secret": "settings.api_secret",
                 "encoding": "hex",
@@ -361,7 +328,7 @@ mod tests {
         )
         .unwrap();
         let mut p =
-            prepared(r#"{"name":"c","path":"/p","body":{"kind":"json","template":{"a":1}}}"#);
+            prepared(r#"{"name":"c","path":"'/p'","body":{"kind":"json","expr":"{\"a\": 1}"}}"#);
         apply_signature(&mut p, &sig, &scope()).unwrap();
 
         let expected = {
@@ -376,13 +343,13 @@ mod tests {
     #[test]
     fn signature_can_land_in_the_body() {
         let sig: SignatureAuth = serde_json::from_str(
-            r#"{"canonical": "{{ req.path }}", "algorithm": "sha256",
+            r#"{"canonical": "req.path", "algorithm": "sha256",
                 "encoding": "base64",
                 "placement": {"kind": "body_field", "path": "auth.sig"}}"#,
         )
         .unwrap();
         let mut p =
-            prepared(r#"{"name":"c","path":"/p","body":{"kind":"json","template":{"a":1}}}"#);
+            prepared(r#"{"name":"c","path":"'/p'","body":{"kind":"json","expr":"{\"a\": 1}"}}"#);
         apply_signature(&mut p, &sig, &scope()).unwrap();
         let PreparedBody::Json(body) = &p.body else {
             panic!("expected json")
@@ -398,7 +365,7 @@ mod tests {
                 "placement": {"kind": "header", "name": "X-Sig"}}"#,
         )
         .unwrap();
-        let mut p = prepared(r#"{"name":"c","path":"/p"}"#);
+        let mut p = prepared(r#"{"name":"c","path":"'/p'"}"#);
         let err = apply_signature(&mut p, &sig, &scope()).unwrap_err();
         assert!(!err.is_uncertain(), "a pre-send config error is certain");
         assert!(err.to_string().contains("no secret"), "{err}");

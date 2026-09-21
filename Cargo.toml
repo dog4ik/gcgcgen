@@ -47,11 +47,16 @@ sqlx = { version = "0.9.0", optional = true, default-features = false, features 
 ] }
 base64 = "0.23.1"
 connect = { path = "crates/connect" }
+mahoraga = { path = "../mahoraga", features = ["serde_json"] }
 hmac = "0.13.0"
 sha2 = "0.11.0"
 md-5 = "0.11.0"
 hex = "0.4.3"
+aes = { version = "0.9.1", optional = true }
+cbc = { version = "0.2.1", features = ["alloc"], optional = true }
+rand = { version = "0.10.2", optional = true }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "charset", "http2", "system-proxy"], optional = true }
+axum-extra = { version = "0.12.6", default-features = false, features = ["typed-header"], optional = true }
 
 [features]
 hydrate = ["leptos/hydrate"]
@@ -68,11 +73,11 @@ ssr = [
   "dep:tracing-subscriber",
   "dep:sqlx",
   "dep:reqwest",
+  "dep:aes",
+  "dep:cbc",
+  "dep:rand",
+  "dep:axum-extra",
 ]
-
-[[example]]
-name = "stub_gateway"
-required-features = ["ssr"]
 
 [dev-dependencies]
 wiremock = "0.6.5"
@@ -87,6 +92,10 @@ denylist = [
   "tracing-subscriber",
   "sqlx",
   "reqwest",
+  "aes",
+  "cbc",
+  "rand",
+  "axum-extra",
 ]
 skip_feature_sets = [["ssr", "hydrate"], []]
 
@@ -106,9 +115,9 @@ tailwind-input-file = "input.css"
 # [Optional] Files in the asset-dir will be copied to the site-root directory
 assets-dir = "public"
 # The IP and port (ex: 127.0.0.1:3000) where the server serves the content. Use it in your server setup.
-site-addr = "127.0.0.1:9595"
+site-addr = "0.0.0.0:64476"
 # The port to use for automatic reload monitoring
-reload-port = 3001
+reload-port = 3231
 
 # [Optional] Command to use when running end2end tests. It will run in the end2end dir.
 #   [Windows] for non-WSL use "npx.cmd playwright test"

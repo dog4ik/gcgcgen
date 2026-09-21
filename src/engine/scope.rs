@@ -1,9 +1,4 @@
 //! Scope construction: what an expression can see, and when.
-//!
-//! A method's scope starts as the inbound request plus `env` and `method`, and
-//! grows a `steps.<name>` entry after each request completes. Inside a
-//! response spec the scope additionally carries `resp`; inside a signature's
-//! canonical string it carries `req`.
 
 use serde_json::{Map, Value};
 
@@ -53,6 +48,7 @@ impl Scope {
     pub fn new(input: &ConnectInput, env: &Env, method: MethodKind) -> Self {
         let mut root = Map::new();
         root.insert("payment".into(), input.payment.clone());
+        root.insert("refund".into(), input.refund.clone());
         root.insert("params".into(), input.params.clone());
         root.insert("settings".into(), input.settings.clone());
         root.insert("steps".into(), Value::Object(Map::new()));
@@ -65,6 +61,32 @@ impl Scope {
             )])),
         );
         Self { root }
+    }
+
+    /// A callback's scope: the settings kept from the original payment, the
+    /// inbound callback, and nothing of reactivepay's other buckets.
+    pub fn for_callback(settings: &Value, callback: Value, env: &Env) -> Self {
+        let mut root = Map::new();
+        root.insert("settings".into(), settings.clone());
+        root.insert("callback".into(), callback);
+        root.insert("steps".into(), Value::Object(Map::new()));
+        root.insert("env".into(), env.to_value());
+        root.insert(
+            "method".into(),
+            Value::Object(Map::from_iter([(
+                "kind".to_string(),
+                Value::String("callback".into()),
+            )])),
+        );
+        Self { root }
+    }
+
+    /// What a callback's `lookup` sees: the callback and `env`, nothing else.
+    pub fn for_lookup(callback: Value, env: &Env) -> Value {
+        Value::Object(Map::from_iter([
+            ("callback".to_string(), callback),
+            ("env".to_string(), env.to_value()),
+        ]))
     }
 
     pub fn value(&self) -> Value {
@@ -133,6 +155,7 @@ mod tests {
     fn input() -> ConnectInput {
         ConnectInput {
             payment: json!({"token": "tok_1"}),
+            refund: json!({"token": "tok_2"}),
             params: json!({"phone": "070"}),
             settings: json!({"client_id": "cid", "client_secret": "sk_live_abcdef"}),
         }
@@ -173,6 +196,25 @@ mod tests {
             s.with_req(json!({"path": "/x"}))["req"]["path"],
             json!("/x")
         );
+    }
+
+    #[test]
+    fn a_callback_scope_carries_only_settings_and_the_callback() {
+        let s = Scope::for_callback(
+            &json!({"client_id": "c"}),
+            json!({"body": {"rrn": "R"}}),
+            &env(),
+        );
+        let v = s.value();
+        assert_eq!(v["callback"]["body"]["rrn"], json!("R"));
+        assert_eq!(v["settings"]["client_id"], json!("c"));
+        assert_eq!(v["method"]["kind"], json!("callback"));
+        for absent in ["payment", "params", "refund"] {
+            assert!(
+                v.get(absent).is_none(),
+                "{absent} is not kept for a callback"
+            );
+        }
     }
 
     #[test]

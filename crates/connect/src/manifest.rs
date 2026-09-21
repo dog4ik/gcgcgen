@@ -1,17 +1,13 @@
-//! The platform's gateway registration payload.
+//! The platform's gateway settings payload.
 
 use serde::{Deserialize, Serialize};
 
 use crate::method::MethodKind;
 
-/// The `params_fields` block for one method: which keys the platform should
-/// place in each inbound bucket.
-///
-/// Deriving this from the integration's own expressions keeps the registration
-/// honest — a field the spec reads is a field the platform is asked to send.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub payment: Vec<String>,
+    pub refund: Vec<String>,
     pub params: Vec<String>,
     pub settings: Vec<String>,
 }
@@ -57,6 +53,7 @@ mod tests {
                     final_waiting_seconds: Some(10),
                     params_fields: Manifest {
                         payment: vec!["token".into(), "gateway_amount".into()],
+                        refund: vec!["token".into(), "gateway_amount".into()],
                         params: vec!["phone".into()],
                         settings: vec!["client_id".into()],
                     },

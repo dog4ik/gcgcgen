@@ -1,9 +1,5 @@
-//! The four methods the platform can invoke.
-
 use serde::{Deserialize, Serialize};
 
-/// Fixed by the platform contract: an integration implements some subset of
-/// these, and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MethodKind {

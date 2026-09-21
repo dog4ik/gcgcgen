@@ -22,17 +22,10 @@ pub enum EngineError {
 }
 
 impl EngineError {
-    /// Whether the gateway may have acted despite the failure.
-    ///
-    /// This is the single most consequential rule in the engine. A transport
-    /// error, a 5xx, or an unparseable body all leave us unable to say whether
-    /// money moved, so the method must report `pending` and let the platform's
-    /// status poller settle it. Reporting `declined` for any of these would
-    /// mark a possibly-charged payment as failed.
-    ///
-    /// An `Api` error with a 4xx is the gateway explicitly refusing, which is
-    /// certain. `Eval` and `Config` are only raised before a request is sent
-    /// (afterwards the engine wraps them in `Decode`), so they are certain too.
+    /// Whether the gateway may have acted despite the failure — the single
+    /// most consequential rule in the engine. Uncertain means the method
+    /// reports `pending` and the platform's poller settles it; reporting
+    /// `declined` would mark a possibly-charged payment as failed.
     pub fn is_uncertain(&self) -> bool {
         match self {
             EngineError::Transport(_) | EngineError::Decode(_) => true,

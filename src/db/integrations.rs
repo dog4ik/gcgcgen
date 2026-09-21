@@ -1,9 +1,3 @@
-//! Reading and writing integration documents.
-//!
-//! Saving validates first: an invalid document never reaches the table, so
-//! anything loaded at request time is known to parse and to reference only
-//! roots, functions and steps that exist.
-
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 
@@ -224,29 +218,24 @@ fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::test_pool;
     use connect::MethodKind;
 
     fn doc(key: &str) -> Integration {
         serde_json::from_str(&format!(
             r#"{{
-                "key": "{key}", "name": "Test", "base_url": "https://api.example.com",
+                "key": "{key}", "name": "Test", "base_url": "'https://api.example.com'",
                 "settings": {{ "fields": [{{ "name": "client_id" }}] }},
                 "methods": {{ "pay": {{
-                    "requests": [{{ "name": "c", "path": "/c" }}],
-                    "result": {{ "status": "'pending'" }} }} }}
+                    "requests": [{{ "name": "c", "path": "'/c'" }}],
+                    "result": {{ "status": "\"pending\"" }} }} }}
             }}"#
         ))
         .unwrap()
     }
 
-    async fn repo() -> Repo {
-        Repo::new(test_pool().await)
-    }
-
-    #[tokio::test]
-    async fn saves_loads_and_lists() {
-        let repo = repo().await;
+    #[sqlx::test]
+    async fn saves_loads_and_lists(pool: SqlitePool) {
+        let repo = Repo::new(pool);
         assert_eq!(repo.save(&doc("a"), None).await.unwrap(), 1);
         assert_eq!(repo.save(&doc("b"), None).await.unwrap(), 1);
 
@@ -257,9 +246,9 @@ mod tests {
         assert_eq!(list[0].methods, vec![MethodKind::Pay]);
     }
 
-    #[tokio::test]
-    async fn saving_again_bumps_the_version_and_keeps_history() {
-        let repo = repo().await;
+    #[sqlx::test]
+    async fn saving_again_bumps_the_version_and_keeps_history(pool: SqlitePool) {
+        let repo = Repo::new(pool);
         repo.save(&doc("a"), Some("first")).await.unwrap();
 
         let mut v2 = doc("a");
@@ -274,9 +263,9 @@ mod tests {
         assert_eq!(repo.load_version("a", 1).await.unwrap().name, "Test");
     }
 
-    #[tokio::test]
-    async fn rollback_appends_rather_than_rewrites() {
-        let repo = repo().await;
+    #[sqlx::test]
+    async fn rollback_appends_rather_than_rewrites(pool: SqlitePool) {
+        let repo = Repo::new(pool);
         repo.save(&doc("a"), None).await.unwrap();
         let mut v2 = doc("a");
         v2.name = "Broken".into();
@@ -291,21 +280,21 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn an_invalid_document_is_never_stored() {
-        let repo = repo().await;
+    #[sqlx::test]
+    async fn an_invalid_document_is_never_stored(pool: SqlitePool) {
+        let repo = Repo::new(pool);
         let mut bad = doc("a");
         bad.methods.get_mut(&MethodKind::Pay).unwrap().requests[0].path =
-            crate::spec::Template::parse("https://elsewhere.example/x").unwrap();
+            crate::spec::Expr::literal("https://elsewhere.example/x");
 
         let err = repo.save(&bad, None).await.unwrap_err();
         assert!(matches!(err, RepoError::Invalid(_)), "{err}");
         assert!(repo.try_load("a").await.unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn missing_things_report_which_thing() {
-        let repo = repo().await;
+    #[sqlx::test]
+    async fn missing_things_report_which_thing(pool: SqlitePool) {
+        let repo = Repo::new(pool);
         assert!(matches!(repo.load("nope").await, Err(RepoError::NotFound(k)) if k == "nope"));
         assert!(repo.try_load("nope").await.unwrap().is_none());
         assert!(matches!(
@@ -320,9 +309,9 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn deleting_takes_the_history_with_it() {
-        let repo = repo().await;
+    #[sqlx::test]
+    async fn deleting_takes_the_history_with_it(pool: SqlitePool) {
+        let repo = Repo::new(pool);
         repo.save(&doc("a"), None).await.unwrap();
         repo.save(&doc("a"), None).await.unwrap();
         repo.delete("a").await.unwrap();

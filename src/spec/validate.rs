@@ -10,22 +10,27 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::auth::{AuthId, AuthKind, TokenRequestAuth};
-use super::expr::Node;
-use super::expr::{func, Expr, Span};
+use super::expr::{self, Expr, Span};
 use super::request::RequestDef;
-use super::template::Template;
-use super::{Integration, MethodDef, MethodKind, Status};
+use super::{CallbackDef, Integration, MethodDef, MethodKind, ResultMapping, Status};
 
-/// Roots available to a request's own templates.
-const REQUEST_ROOTS: &[&str] = &["payment", "params", "settings", "steps", "env", "method"];
+/// Roots available to a request's own expressions.
+const REQUEST_ROOTS: &[&str] = &[
+    "payment", "params", "refund", "settings", "steps", "env", "method",
+];
 /// Roots available while interpreting a response.
 const RESPONSE_ROOTS: &[&str] = &[
-    "payment", "params", "settings", "steps", "env", "method", "resp",
+    "payment", "params", "refund", "settings", "steps", "env", "method", "resp",
 ];
-/// Roots available to a signature's canonical string.
+/// Roots available to a signature's canonical expression.
 const SIGNATURE_ROOTS: &[&str] = &[
     "payment", "params", "settings", "steps", "env", "method", "req",
 ];
+/// Roots available inside a callback: the stored settings plus the inbound
+/// callback. The payment, params and refund buckets are not kept.
+const CALLBACK_ROOTS: &[&str] = &["settings", "steps", "env", "method", "callback"];
+/// A callback's `lookup` runs before the stored context is found.
+const LOOKUP_ROOTS: &[&str] = &["callback", "env"];
 /// A cache key must be derivable before anything runs.
 const CACHE_KEY_ROOTS: &[&str] = &["payment", "params", "settings", "env", "method"];
 
@@ -77,7 +82,10 @@ pub fn validate(integration: &Integration) -> Result<(), Report> {
     if v.issues.is_empty() {
         Ok(())
     } else {
-        Err(Report { issues: v.issues })
+        // Fields are walked in hash order: sort, or the report shuffles.
+        let mut issues = v.issues;
+        issues.sort_by(|a, b| (&a.location, &a.message).cmp(&(&b.location, &b.message)));
+        Err(Report { issues })
     }
 }
 
@@ -108,6 +116,7 @@ impl<'a> Validator<'a> {
         self.check_auths();
         self.check_base_url();
         self.check_methods();
+        self.check_callback();
     }
 
     fn check_key(&mut self) {
@@ -129,18 +138,16 @@ impl<'a> Validator<'a> {
     }
 
     fn check_base_url(&mut self) {
-        let tpl = self.integration.base_url.clone();
-        self.check_template(&tpl, REQUEST_ROOTS, "base_url");
-        // A templated base URL is normal — it is how sandbox switching is
-        // expressed — so the scheme can only be checked statically when the
-        // template has no holes. The engine re-checks the rendered value on
-        // every call, which is the check that actually protects traffic.
-        let src = tpl.src();
-        if tpl.is_static() {
-            if !(src.starts_with("http://") || src.starts_with("https://")) {
+        let base_url = self.integration.base_url.clone();
+        self.check_expr(&base_url, REQUEST_ROOTS, "base_url");
+        // Only a literal can be checked here. The engine re-checks the
+        // evaluated value on every call, which is the check that protects
+        // traffic.
+        if let Some(url) = base_url.as_literal() {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
                 self.issue("base_url", "must start with `http://` or `https://`");
             }
-            if src.ends_with('/') {
+            if url.ends_with('/') {
                 self.issue(
                     "base_url",
                     "must not end with `/` — request paths supply it",
@@ -148,8 +155,6 @@ impl<'a> Validator<'a> {
             }
         }
     }
-
-    // -- auth ---------------------------------------------------------------
 
     fn check_auths(&mut self) {
         let mut seen: BTreeSet<&AuthId> = BTreeSet::new();
@@ -178,10 +183,10 @@ impl<'a> Validator<'a> {
                 if name.trim().is_empty() {
                     self.issue(loc, "name must not be empty");
                 }
-                self.check_template(value, REQUEST_ROOTS, loc);
+                self.check_expr(value, REQUEST_ROOTS, loc);
             }
             AuthKind::Signature(sig) => {
-                self.check_template(&sig.canonical, SIGNATURE_ROOTS, loc);
+                self.check_expr(&sig.canonical, SIGNATURE_ROOTS, loc);
                 match (&sig.secret, sig.algorithm.needs_secret()) {
                     (Some(s), _) => self.check_expr(s, REQUEST_ROOTS, loc),
                     (None, true) => {
@@ -195,14 +200,10 @@ impl<'a> Validator<'a> {
     }
 
     fn check_token_request(&mut self, tr: &TokenRequestAuth, loc: &str) {
-        // The cache key is what keeps two merchants on the same integration
-        // from sharing a token. An empty one is a credential leak, not a
-        // convenience.
         if tr.cache_key.is_empty() {
             self.issue(
                 loc,
-                "cache_key must not be empty — without a settings-derived key, \
-                 every merchant on this integration would share one token",
+                "cache_key must not be empty, without a settings-derived key, every merchant on this integration would share one token",
             );
         }
         for e in &tr.cache_key {
@@ -274,8 +275,6 @@ impl<'a> Validator<'a> {
         }
     }
 
-    // -- methods ------------------------------------------------------------
-
     fn check_methods(&mut self) {
         if self.integration.methods.is_empty() {
             self.issue("methods", "define at least one method");
@@ -292,10 +291,25 @@ impl<'a> Validator<'a> {
         if method.requests.is_empty() {
             self.issue(&base, "define at least one request");
         }
+        let steps = self.check_requests(&base, &method.requests, REQUEST_ROOTS);
+        self.check_result(
+            &method.result,
+            REQUEST_ROOTS,
+            &format!("{base}.result"),
+            &steps,
+        );
+    }
 
+    /// Checks a request sequence and returns the step names it produces.
+    fn check_requests(
+        &mut self,
+        base: &str,
+        requests: &[RequestDef],
+        roots: &[&str],
+    ) -> BTreeSet<String> {
         // A request may only read steps that already ran.
         let mut available: BTreeSet<String> = BTreeSet::new();
-        for (i, req) in method.requests.iter().enumerate() {
+        for (i, req) in requests.iter().enumerate() {
             let loc = format!("{base}.requests[{i}]");
             if req.name.trim().is_empty() {
                 self.issue(&loc, "name must not be empty — it addresses `steps.<name>`");
@@ -315,18 +329,71 @@ impl<'a> Validator<'a> {
             if !available.insert(req.name.clone()) {
                 self.issue(&loc, format!("duplicate request name `{}`", req.name));
             }
-            // `available` now includes this request, which is correct for the
-            // response spec (it may read its own output) but not for the
-            // request itself; the difference has never mattered in practice
-            // and keeping one set makes the message clearer.
             let mut earlier = available.clone();
             earlier.remove(&req.name);
-            self.check_request(req, REQUEST_ROOTS, &loc, &earlier);
+            self.check_request(req, roots, &loc, &earlier);
         }
+        available
+    }
 
+    fn check_callback(&mut self) {
+        let Some(cb) = &self.integration.callback else {
+            return;
+        };
+        let base = "callback";
+        if !self.integration.methods.contains_key(&MethodKind::Pay)
+            && !self.integration.methods.contains_key(&MethodKind::Payout)
+        {
+            self.issue(
+                base,
+                "a callback needs a `pay` or `payout` method — that is where its context is kept",
+            );
+        }
+        self.check_expr(&cb.lookup, LOOKUP_ROOTS, &format!("{base}.lookup"));
+        if let Some(e) = &cb.verify {
+            self.check_expr(e, CALLBACK_ROOTS, &format!("{base}.verify"));
+            self.check_steps([e], &BTreeSet::new(), &format!("{base}.verify"));
+        }
+        let steps = self.check_requests(base, &cb.requests, CALLBACK_ROOTS);
         let result_loc = format!("{base}.result");
-        let steps = available;
-        self.check_result(method, &result_loc, &steps);
+        self.check_result(&cb.result, CALLBACK_ROOTS, &result_loc, &steps);
+        self.check_callback_result(cb, &result_loc);
+        if let Some(body) = &cb.ack.body {
+            self.check_expr(body, CALLBACK_ROOTS, &format!("{base}.ack"));
+            self.check_steps([body], &steps, &format!("{base}.ack"));
+        }
+        if !(100..=599).contains(&cb.ack.status) {
+            self.issue(format!("{base}.ack.status"), "must be an HTTP status code");
+        }
+    }
+
+    fn check_callback_result(&mut self, cb: &CallbackDef, loc: &str) {
+        let r = &cb.result;
+        // Nothing to fall back to: the payment bucket is not kept.
+        if r.amount.is_none() {
+            self.issue(
+                format!("{loc}.amount"),
+                "required — the platform needs the settled amount",
+            );
+        }
+        if r.currency.is_none() {
+            self.issue(
+                format!("{loc}.currency"),
+                "required — the platform needs the settled currency",
+            );
+        }
+        for (field, set) in [
+            ("gateway_token", r.gateway_token.is_some()),
+            ("redirect_request", r.redirect_request.is_some()),
+            ("requisites", r.requisites.is_some()),
+        ] {
+            if set {
+                self.issue(
+                    format!("{loc}.{field}"),
+                    "not part of a callback — remove it",
+                );
+            }
+        }
     }
 
     fn check_request(
@@ -341,12 +408,16 @@ impl<'a> Validator<'a> {
                 self.issue(loc, format!("unknown auth `{id}`"));
             }
         }
-        if req.path.src().starts_with("http://") || req.path.src().starts_with("https://") {
+        if req
+            .path
+            .as_literal()
+            .is_some_and(|p| p.starts_with("http://") || p.starts_with("https://"))
+        {
             self.issue(loc, "path is appended to base_url; it must not be absolute");
         }
-        for tpl in req.templates() {
-            self.check_template(tpl, roots, loc);
-            self.check_steps(tpl.exprs(), earlier_steps, loc);
+        for e in req.exprs() {
+            self.check_expr(e, roots, loc);
+            self.check_steps([e], earlier_steps, loc);
         }
         if let Some(e) = &req.run_if {
             self.check_expr(e, roots, &format!("{loc}.run_if"));
@@ -354,16 +425,13 @@ impl<'a> Validator<'a> {
         }
 
         // The response spec additionally sees `resp`.
+        let resp_roots: Vec<&str> = roots.iter().copied().chain(["resp"]).collect();
         let resp_loc = format!("{loc}.response");
-        let mut cond_exprs = Vec::new();
-        req.response.success_when.exprs(&mut cond_exprs);
-        for e in cond_exprs {
-            self.check_expr(e, RESPONSE_ROOTS, &resp_loc);
+        if let Some(e) = &req.response.success_when {
+            self.check_expr(e, &resp_roots, &resp_loc);
         }
-        if let Some(t) = &req.response.success {
-            for tpl in t.templates() {
-                self.check_template(tpl, RESPONSE_ROOTS, &resp_loc);
-            }
+        if let Some(e) = &req.response.success {
+            self.check_expr(e, &resp_roots, &resp_loc);
         }
         for e in req
             .response
@@ -372,21 +440,26 @@ impl<'a> Validator<'a> {
             .iter()
             .chain(req.response.error.code.iter())
         {
-            self.check_expr(e, RESPONSE_ROOTS, &resp_loc);
+            self.check_expr(e, &resp_roots, &resp_loc);
         }
     }
 
-    fn check_result(&mut self, method: &MethodDef, loc: &str, steps: &BTreeSet<String>) {
+    fn check_result(
+        &mut self,
+        result: &ResultMapping,
+        roots: &[&str],
+        loc: &str,
+        steps: &BTreeSet<String>,
+    ) {
         let mut exprs = Vec::new();
-        method.result.exprs(&mut exprs);
+        result.exprs(&mut exprs);
         for e in &exprs {
-            self.check_expr(e, REQUEST_ROOTS, loc);
+            self.check_expr(e, roots, loc);
         }
         self.check_steps(exprs.iter().copied(), steps, loc);
 
-        // A literal status is checkable now; a computed one is checked at
-        // runtime, where an unrecognised value is a hard error.
-        for lit in literal_strings(method.result.status.node()) {
+        // A computed status is checked at runtime instead.
+        for lit in result.status.string_results() {
             if Status::parse(&lit).is_none() {
                 self.issue_at(
                     format!("{loc}.status"),
@@ -394,21 +467,15 @@ impl<'a> Validator<'a> {
                         "`{lit}` is not a status — expected one of {}",
                         Status::ALL.map(|s| s.as_str()).join(", ")
                     ),
-                    Span::new(0, method.result.status.src().len()),
+                    Span::new(0, result.status.src().len()),
                 );
             }
         }
     }
 
-    // -- expressions --------------------------------------------------------
-
-    fn check_template(&mut self, tpl: &Template, roots: &[&str], loc: &str) {
-        for e in tpl.exprs() {
-            self.check_expr(e, roots, loc);
-        }
-    }
-
     fn check_expr(&mut self, e: &Expr, roots: &[&str], loc: &str) {
+        // mahoraga carries no spans on parsed nodes.
+        let whole = Span::new(0, e.src().len());
         for root in e.roots() {
             if !roots.contains(&root.as_str()) {
                 self.issue_at(
@@ -417,26 +484,22 @@ impl<'a> Validator<'a> {
                         "unknown root `{root}` here — available: {}",
                         roots.join(", ")
                     ),
-                    Span::new(0, e.src().len()),
+                    whole,
                 );
             }
         }
-        for (name, argc, span) in e.calls() {
-            match func::lookup(&name) {
-                None => self.issue_at(loc, format!("unknown function `{name}`"), span),
-                Some(spec) if !(spec.min_args..=spec.max_args).contains(&argc) => {
-                    let want = if spec.min_args == spec.max_args {
-                        spec.min_args.to_string()
-                    } else {
-                        format!("{}..={}", spec.min_args, spec.max_args)
-                    };
-                    self.issue_at(
-                        loc,
-                        format!("`{name}` takes {want} argument(s), got {argc}"),
-                        span,
-                    );
-                }
-                Some(_) => {}
+        for call in e.calls() {
+            let Some(arity) = expr::arity(&call.name) else {
+                self.issue_at(loc, format!("unknown function `{}`", call.name), whole);
+                continue;
+            };
+            if call.args != arity {
+                let plural = if arity == 1 { "argument" } else { "arguments" };
+                self.issue_at(
+                    loc,
+                    format!("`{}` takes {arity} {plural}, got {}", call.name, call.args),
+                    whole,
+                );
             }
         }
     }
@@ -449,7 +512,8 @@ impl<'a> Validator<'a> {
         loc: &str,
     ) {
         for e in exprs {
-            for (name, span) in step_refs(e.node()) {
+            let span = Span::new(0, e.src().len());
+            for name in step_refs(e) {
                 if !available.contains(&name) {
                     let hint = if available.is_empty() {
                         "no earlier request in this method".to_string()
@@ -467,64 +531,14 @@ impl<'a> Validator<'a> {
 }
 
 /// Every `steps.<name>` referenced by an expression.
-fn step_refs(node: &Node) -> Vec<(String, Span)> {
-    use super::expr::parse::Seg;
-    let mut out = Vec::new();
-    fn walk(node: &Node, out: &mut Vec<(String, Span)>) {
-        use super::expr::parse::Seg as S;
-        match node {
-            Node::Path { root, segs, span } if root == "steps" => {
-                if let Some(S::Key(k)) = segs.first() {
-                    out.push((k.clone(), *span));
-                }
-            }
-            Node::Path { .. } | Node::Literal(_) => {}
-            Node::Array(items) | Node::Coalesce(items) => items.iter().for_each(|n| walk(n, out)),
-            Node::Object(fields) => fields.iter().for_each(|(_, n)| walk(n, out)),
-            Node::Pipe { input, calls } => {
-                walk(input, out);
-                for c in calls {
-                    c.args.iter().for_each(|n| walk(n, out));
-                }
-            }
-        }
-    }
-    let _ = Seg::Index(0); // keep the import honest across refactors
-    walk(node, &mut out);
-    out
-}
-
-/// String literals an expression can produce directly, used to check a status
-/// mapping without running it.
-fn literal_strings(node: &Node) -> Vec<String> {
-    let mut out = Vec::new();
-    fn walk(node: &Node, out: &mut Vec<String>) {
-        match node {
-            Node::Literal(serde_json::Value::String(s)) => out.push(s.clone()),
-            Node::Literal(_) | Node::Path { .. } => {}
-            Node::Coalesce(items) => items.iter().for_each(|n| walk(n, out)),
-            // Array and object literals are data, not the produced value.
-            Node::Array(_) | Node::Object(_) => {}
-            Node::Pipe { input, calls } => {
-                // `x | map({...})` produces the table's values.
-                match calls.last() {
-                    Some(c) if c.name == "map" => {
-                        if let Some(Node::Object(fields)) = c.args.first() {
-                            for (_, v) in fields {
-                                if let Node::Literal(serde_json::Value::String(s)) = v {
-                                    out.push(s.clone());
-                                }
-                            }
-                        }
-                    }
-                    Some(_) => {}
-                    None => walk(input, out),
-                }
-            }
-        }
-    }
-    walk(node, &mut out);
-    out
+fn step_refs(e: &Expr) -> Vec<String> {
+    e.paths()
+        .into_iter()
+        .filter_map(|path| match path.as_slice() {
+            [root, name, ..] if root == "steps" => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -537,7 +551,7 @@ mod tests {
             r#"{{
                 "key": "scripay",
                 "name": "Scripay",
-                "base_url": "https://api.example.com",
+                "base_url": "'https://api.example.com'",
                 "settings": {{ "fields": [{{ "name": "client_id" }}] }},
                 "auths": {auths},
                 "methods": {methods}
@@ -550,11 +564,11 @@ mod tests {
         format!(
             r#"{{ "pay": {{
                  "requests": [
-                   {{ "name": "collection", "path": "/c",
-                      "body": {{ "kind": "json", "template": {{ "a": "{{{{ payment.token }}}}" }} }} }}
+                   {{ "name": "collection", "path": "'/c'",
+                      "body": {{ "kind": "json", "expr": "{{\"a\": payment.token}}" }} }}
                    {extra}
                  ],
-                 "result": {{ "status": "'pending'", "gateway_token": "steps.collection.body.rrn" }}
+                 "result": {{ "status": "\"pending\"", "gateway_token": "steps.collection.body.rrn" }}
                }} }}"#
         )
     }
@@ -568,9 +582,9 @@ mod tests {
     #[test]
     fn rejects_unknown_root() {
         let m = r#"{ "pay": { "requests": [
-                    { "name": "c", "path": "/c",
-                      "body": { "kind": "json", "template": { "a": "{{ nope.x }}" } } }],
-                    "result": { "status": "'pending'" } } }"#;
+                    { "name": "c", "path": "'/c'",
+                      "body": { "kind": "json", "expr": "{\"a\": nope.x}" } }],
+                    "result": { "status": "\"pending\"" } } }"#;
         let e = validate(&doc(m, "[]")).unwrap_err();
         assert!(e.to_string().contains("unknown root `nope`"), "{e}");
     }
@@ -578,8 +592,8 @@ mod tests {
     #[test]
     fn rejects_resp_outside_a_response_spec() {
         let m = r#"{ "pay": { "requests": [
-                    { "name": "c", "path": "/{{ resp.body.x }}" }],
-                    "result": { "status": "'pending'" } } }"#;
+                    { "name": "c", "path": "'/' + resp.body.x" }],
+                    "result": { "status": "\"pending\"" } } }"#;
         let e = validate(&doc(m, "[]")).unwrap_err();
         assert!(e.to_string().contains("unknown root `resp`"), "{e}");
     }
@@ -587,18 +601,18 @@ mod tests {
     #[test]
     fn allows_resp_inside_a_response_spec() {
         let m = r#"{ "pay": { "requests": [
-                    { "name": "c", "path": "/c",
+                    { "name": "c", "path": "'/c'",
                       "response": { "error": { "message": "resp.body.message" } } }],
-                    "result": { "status": "'pending'" } } }"#;
+                    "result": { "status": "\"pending\"" } } }"#;
         validate(&doc(m, "[]")).unwrap();
     }
 
     #[test]
     fn rejects_a_forward_step_reference() {
         let m = r#"{ "pay": { "requests": [
-                    { "name": "one", "path": "/{{ steps.two.body.x }}" },
-                    { "name": "two", "path": "/t" }],
-                    "result": { "status": "'pending'" } } }"#;
+                    { "name": "one", "path": "'/' + steps.two.body.x" },
+                    { "name": "two", "path": "'/t'" }],
+                    "result": { "status": "\"pending\"" } } }"#;
         let e = validate(&doc(m, "[]")).unwrap_err();
         assert!(e.to_string().contains("`steps.two`"), "{e}");
     }
@@ -606,20 +620,19 @@ mod tests {
     #[test]
     fn allows_a_backward_step_reference() {
         let m = r#"{ "pay": { "requests": [
-                    { "name": "one", "path": "/o" },
-                    { "name": "two", "path": "/{{ steps.one.body.x }}" }],
-                    "result": { "status": "'pending'" } } }"#;
+                    { "name": "one", "path": "'/o'" },
+                    { "name": "two", "path": "'/' + steps.one.body.x" }],
+                    "result": { "status": "\"pending\"" } } }"#;
         validate(&doc(m, "[]")).unwrap();
     }
 
     #[test]
     fn rejects_unknown_function_and_bad_arity() {
         let m = r#"{ "pay": { "requests": [
-                    { "name": "c", "path": "/c",
-                      "body": { "kind": "json", "template": {
-                        "a": "{{ payment.token | trm }}",
-                        "b": "{{ payment.token | null_if }}" } } }],
-                    "result": { "status": "'pending'" } } }"#;
+                    { "name": "c", "path": "'/c'",
+                      "body": { "kind": "json",
+                        "expr": "{\"a\": payment.token | trm, \"b\": payment.token | null_if}" } }],
+                    "result": { "status": "\"pending\"" } } }"#;
         let e = validate(&doc(m, "[]")).unwrap_err();
         let s = e.to_string();
         assert!(s.contains("unknown function `trm`"), "{s}");
@@ -628,24 +641,37 @@ mod tests {
 
     #[test]
     fn rejects_a_bad_literal_status() {
-        let m = r#"{ "pay": { "requests": [{ "name": "c", "path": "/c" }],
-                    "result": { "status": "'succeeded'" } } }"#;
+        let m = r#"{ "pay": { "requests": [{ "name": "c", "path": "'/c'" }],
+                    "result": { "status": "\"succeeded\"" } } }"#;
         let e = validate(&doc(m, "[]")).unwrap_err();
         assert!(e.to_string().contains("`succeeded` is not a status"), "{e}");
     }
 
     #[test]
     fn checks_statuses_produced_by_a_map_table() {
-        let m = r#"{ "pay": { "requests": [{ "name": "c", "path": "/c" }],
-                    "result": { "status": "steps.c.body.status | map({Success:'approved', Bad:'oops'})" } } }"#;
+        let m = r#"{ "pay": { "requests": [{ "name": "c", "path": "'/c'" }],
+                    "result": { "status": "steps.c.body.status | map({\"Success\":\"approved\", \"Bad\":\"oops\"})" } } }"#;
         let e = validate(&doc(m, "[]")).unwrap_err();
         assert!(e.to_string().contains("`oops` is not a status"), "{e}");
     }
 
     #[test]
+    fn checks_the_redirect_and_the_requisites_like_any_other_expression() {
+        let m = r#"{ "pay": { "requests": [{ "name": "c", "path": "'/c'" }],
+                    "result": { "status": "\"pending\"",
+                                "redirect_request": { "type": "post",
+                                                      "url": "steps.nope.body.url",
+                                                      "params": "{}" },
+                                "requisites": "{\"iban\": resp.body.iban}" } } }"#;
+        let e = validate(&doc(m, "[]")).unwrap_err().to_string();
+        assert!(e.contains("`steps.nope`"), "{e}");
+        assert!(e.contains("unknown root `resp`"), "{e}");
+    }
+
+    #[test]
     fn rejects_unknown_auth_reference() {
-        let m = r#"{ "pay": { "requests": [{ "name": "c", "path": "/c", "auth": "nope" }],
-                    "result": { "status": "'pending'" } } }"#;
+        let m = r#"{ "pay": { "requests": [{ "name": "c", "path": "'/c'", "auth": "nope" }],
+                    "result": { "status": "\"pending\"" } } }"#;
         let e = validate(&doc(m, "[]")).unwrap_err();
         assert!(e.to_string().contains("unknown auth `nope`"), "{e}");
     }
@@ -653,7 +679,7 @@ mod tests {
     #[test]
     fn rejects_an_empty_cache_key() {
         let a = r#"[{ "id": "oauth", "kind": "token_request",
-                      "request": { "name": "auth", "path": "/t" },
+                      "request": { "name": "auth", "path": "'/t'" },
                       "token": "resp.body.access_token",
                       "cache_key": [],
                       "placement": { "kind": "bearer" } }]"#;
@@ -664,7 +690,7 @@ mod tests {
     #[test]
     fn rejects_a_cache_key_that_depends_on_a_step() {
         let a = r#"[{ "id": "oauth", "kind": "token_request",
-                      "request": { "name": "auth", "path": "/t" },
+                      "request": { "name": "auth", "path": "'/t'" },
                       "token": "resp.body.access_token",
                       "cache_key": ["steps.c.body.x"],
                       "placement": { "kind": "bearer" } }]"#;
@@ -676,11 +702,11 @@ mod tests {
     fn rejects_an_auth_cycle() {
         let a = r#"[
             { "id": "a", "kind": "token_request",
-              "request": { "name": "ra", "path": "/a", "auth": "b" },
+              "request": { "name": "ra", "path": "'/a'", "auth": "b" },
               "token": "resp.body.t", "cache_key": ["settings.client_id"],
               "placement": { "kind": "bearer" } },
             { "id": "b", "kind": "token_request",
-              "request": { "name": "rb", "path": "/b", "auth": "a" },
+              "request": { "name": "rb", "path": "'/b'", "auth": "a" },
               "token": "resp.body.t", "cache_key": ["settings.client_id"],
               "placement": { "kind": "bearer" } }]"#;
         let e = validate(&doc(&simple_method(""), a)).unwrap_err();
@@ -690,7 +716,7 @@ mod tests {
     #[test]
     fn rejects_hmac_without_a_secret() {
         let a = r#"[{ "id": "sig", "kind": "signature",
-                      "canonical": "{{ req.path }}",
+                      "canonical": "req.path",
                       "algorithm": "hmac_sha256",
                       "placement": { "kind": "header", "name": "X-Sig" } }]"#;
         let e = validate(&doc(&simple_method(""), a)).unwrap_err();
@@ -698,21 +724,20 @@ mod tests {
     }
 
     #[test]
-    fn allows_a_templated_base_url() {
+    fn allows_a_computed_base_url() {
         let mut d = doc(&simple_method(""), "[]");
-        d.base_url = Template::parse(
-            "{{ settings.sandbox | to_bool | map({true:'https://sandbox.example', _default:'https://api.example'}) }}",
-        )
-        .unwrap();
+        d.base_url =
+            Expr::parse(r#"settings.sandbox ? "https://sandbox.example" : "https://api.example""#)
+                .unwrap();
         validate(&d).unwrap();
     }
 
     #[test]
     fn rejects_an_absolute_request_path_and_a_bad_base_url() {
         let mut d = doc(&simple_method(""), "[]");
-        d.base_url = Template::parse("api.example.com/").unwrap();
+        d.base_url = Expr::literal("api.example.com/");
         d.methods.get_mut(&MethodKind::Pay).unwrap().requests[0].path =
-            Template::parse("https://evil.example/x").unwrap();
+            Expr::literal("https://evil.example/x");
         let e = validate(&d).unwrap_err();
         let s = e.to_string();
         assert!(s.contains("`http://`"), "{s}");
@@ -722,8 +747,8 @@ mod tests {
     #[test]
     fn rejects_duplicate_request_names() {
         let m = r#"{ "pay": { "requests": [
-                    { "name": "c", "path": "/a" }, { "name": "c", "path": "/b" }],
-                    "result": { "status": "'pending'" } } }"#;
+                    { "name": "c", "path": "'/a'" }, { "name": "c", "path": "'/b'" }],
+                    "result": { "status": "\"pending\"" } } }"#;
         let e = validate(&doc(m, "[]")).unwrap_err();
         assert!(e.to_string().contains("duplicate request name"), "{e}");
     }
@@ -731,15 +756,70 @@ mod tests {
     #[test]
     fn derives_the_platform_manifest_from_expressions() {
         let m = r#"{ "pay": { "requests": [
-                    { "name": "c", "path": "/c", "body": { "kind": "json", "template": {
-                        "o": "{{ payment.token }}",
-                        "a": "{{ payment.gateway_amount | minor_to_major }}",
-                        "p": "{{ params.phone ?? params.customer.phone }}" } } }],
-                    "result": { "status": "'pending'" } } }"#;
+                    { "name": "c", "path": "'/c'", "body": { "kind": "json",
+                        "expr": "{\"o\": payment.token, \"a\": payment.gateway_amount | minor_to_major, \"p\": params.phone ?? params.customer.phone}" } }],
+                    "result": { "status": "\"pending\"" } } }"#;
         let d = doc(m, "[]");
         let man = d.manifest(MethodKind::Pay).unwrap();
         assert_eq!(man.payment, ["gateway_amount", "token"]);
         assert_eq!(man.params, ["customer", "phone"]);
         assert_eq!(man.settings, ["client_id"]);
+    }
+
+    fn with_callback(callback: &str) -> Integration {
+        let mut d = doc(&simple_method(""), "[]");
+        d.callback = Some(serde_json::from_str(callback).unwrap());
+        d
+    }
+
+    #[test]
+    fn a_callback_reads_settings_and_the_callback_but_not_payment() {
+        let ok = with_callback(
+            r#"{ "lookup": "callback.body.rrn",
+                 "verify": "callback.query.sig == settings.client_id",
+                 "result": { "status": "\"approved\"", "amount": "callback.body.amount",
+                             "currency": "callback.body.currency" } }"#,
+        );
+        validate(&ok).unwrap();
+
+        let bad = with_callback(
+            r#"{ "lookup": "settings.client_id",
+                 "result": { "status": "\"approved\"", "amount": "payment.gateway_amount",
+                             "currency": "callback.body.currency" } }"#,
+        );
+        let e = validate(&bad).unwrap_err().to_string();
+        assert!(
+            e.contains("callback.lookup: unknown root `settings`"),
+            "{e}"
+        );
+        assert!(e.contains("callback.result: unknown root `payment`"), "{e}");
+    }
+
+    #[test]
+    fn a_callback_must_report_amount_and_currency_and_nothing_else() {
+        let d = with_callback(
+            r#"{ "lookup": "callback.body.rrn",
+                 "result": { "status": "\"approved\"", "gateway_token": "callback.body.rrn" } }"#,
+        );
+        let e = validate(&d).unwrap_err().to_string();
+        assert!(e.contains("callback.result.amount: required"), "{e}");
+        assert!(e.contains("callback.result.currency: required"), "{e}");
+        assert!(
+            e.contains("callback.result.gateway_token: not part of a callback"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_callback_request_may_read_only_earlier_steps() {
+        let d = with_callback(
+            r#"{ "lookup": "callback.body.rrn",
+                 "requests": [{ "name": "check", "path": "'/s/' + steps.later.body.x" }],
+                 "result": { "status": "\"approved\"", "amount": "steps.check.body.amount",
+                             "currency": "steps.check.body.currency" } }"#,
+        );
+        let e = validate(&d).unwrap_err().to_string();
+        assert!(e.contains("callback.requests[0]: `steps.later`"), "{e}");
+        assert!(!e.contains("steps.check"), "{e}");
     }
 }

@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::OffsetDateTime;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoggedRequest {
@@ -25,8 +24,6 @@ pub struct InteractionLog {
     /// The raw response. A non-JSON body is kept as a string rather than
     /// dropped, so an HTML error page survives into the audit trail.
     pub response: Option<Value>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
     /// Seconds.
     pub duration: f32,
 }
@@ -47,7 +44,6 @@ mod tests {
             }),
             status: Some(200),
             response: Some(json!({"access_token": "t"})),
-            created_at: OffsetDateTime::UNIX_EPOCH,
             duration: 0.25,
         };
         let v: Value = serde_json::to_value(&log).unwrap();

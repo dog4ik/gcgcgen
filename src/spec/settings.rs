@@ -1,10 +1,3 @@
-//! The settings schema: the input parameters reactivepay sends in the
-//! `settings` bucket of every request.
-//!
-//! Credentials arrive per-request and are **never stored** by this service —
-//! the schema declares their shape so the editor can render a form and so the
-//! platform registration manifest can be generated, nothing more.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,16 +29,12 @@ pub struct FieldDef {
     /// Key within the inbound `settings` object.
     pub name: String,
     #[serde(default)]
-    pub label: Option<String>,
-    #[serde(default)]
     pub ty: FieldType,
     #[serde(default)]
     pub required: bool,
     /// Masked in the editor and redacted from interaction logs.
     #[serde(default)]
     pub secret: bool,
-    #[serde(default)]
-    pub help: Option<String>,
     #[serde(default)]
     pub default: Option<Value>,
 }
@@ -54,11 +43,9 @@ impl FieldDef {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            label: None,
             ty: FieldType::Text,
             required: false,
             secret: false,
-            help: None,
             default: None,
         }
     }
@@ -77,10 +64,6 @@ impl FieldDef {
         self.ty = ty;
         self
     }
-
-    pub fn display(&self) -> &str {
-        self.label.as_deref().unwrap_or(&self.name)
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -90,9 +73,6 @@ pub enum FieldType {
     Text,
     Number,
     Bool,
-    Select {
-        options: Vec<String>,
-    },
 }
 
 #[cfg(test)]

@@ -2,35 +2,28 @@
   "key": "scripay",
   "name": "Scripay",
   "description": "Kenyan mobile-money collections and payouts. Reproduces the hand-written oxyscripay adapter as a spec document.",
-  "base_url": "{{ settings.sandbox | to_bool | map({true: 'https://api-sandbox.scripay.com', _default: 'https://api.scripay.com'}) }}",
-
+  "base_url": "settings.sandbox | to_bool | map({\"true\": \"https://api-sandbox.scripay.com\", \"_default\": \"https://api.scripay.com\"})",
   "settings": {
     "fields": [
-      { "name": "sandbox", "label": "Sandbox", "ty": { "kind": "bool" } },
-      { "name": "client_id", "label": "Client ID", "required": true },
-      { "name": "client_secret", "label": "Client secret", "required": true, "secret": true },
-      { "name": "wallet", "label": "Wallet", "required": true,
-        "help": "Destination for collections, source for payouts." },
-      { "name": "code", "label": "Channel code", "required": true },
-      { "name": "channel", "label": "Default channel" }
+      { "name": "sandbox", "ty": { "kind": "bool" } },
+      { "name": "client_id", "required": true },
+      { "name": "client_secret", "required": true, "secret": true },
+      { "name": "wallet", "required": true },
+      { "name": "code", "required": true },
+      { "name": "channel" }
     ]
   },
-
   "auths": [
     {
       "id": "oauth",
-      "label": "Scripay access token",
       "kind": "token_request",
       "request": {
         "name": "auth",
         "method": "post",
-        "path": "/v1/auth/access-token",
+        "path": "'/v1/auth/access-token'",
         "body": {
           "kind": "json",
-          "template": {
-            "client_id": "{{ settings.client_id }}",
-            "client_secret": "{{ settings.client_secret }}"
-          }
+          "expr": "{\n  \"client_id\": settings.client_id,\n  \"client_secret\": settings.client_secret\n}"
         },
         "response": { "error": { "message": "resp.body.message" } }
       },
@@ -42,96 +35,76 @@
       "placement": { "kind": "bearer" }
     }
   ],
-
   "methods": {
     "pay": {
       "requests": [
         {
           "name": "collection",
           "method": "post",
-          "path": "/v1/gateway/initiate/collection",
+          "path": "'/v1/gateway/initiate/collection'",
           "auth": "oauth",
           "body": {
             "kind": "json",
-            "template": {
-              "purpose": "payment",
-              "order_id": "{{ payment.token }}",
-              "amount": "{{ payment.gateway_amount | minor_to_major }}",
-              "callback_url": "{{ env.callback_url }}",
-              "description": "{{ payment.product ?? payment.order_number ?? 'Payment' }}",
-              "wallet": "{{ settings.wallet }}",
-              "channel": "{{? params.extra_return_param | null_if('_blank_') ?? settings.channel }}",
-              "data": {
-                "phone_number": "{{ params.phone ?? params.customer.phone }}",
-                "account_name": "{{? [params.first_name ?? params.customer.first_name, params.last_name ?? params.customer.last_name] | join(' ') | trim }}",
-                "code": "{{ settings.code }}"
-              }
-            }
+            "expr": "{\n  \"purpose\": 'payment',\n  \"order_id\": payment.token,\n  \"amount\": payment.gateway_amount | minor_to_major,\n  \"callback_url\": env.callback_url,\n  \"description\": payment.product ?? payment.order_number ?? \"Payment\",\n  \"wallet\": settings.wallet,\n  \"channel\": (params.extra_return_param | null_if(\"_blank_\")) ?? settings.channel,\n  \"data\": {\n    \"phone_number\": params.phone ?? params.customer.phone,\n    \"account_name\": [params.first_name ?? params.customer.first_name, params.last_name ?? params.customer.last_name] | join(\" \") | trim,\n    \"code\": settings.code\n  }\n}"
           },
           "response": { "error": { "message": "resp.body.message", "on_error": "fail" } }
         }
       ],
       "result": {
-        "status": "'pending'",
+        "status": "\"pending\"",
         "gateway_token": "steps.collection.body.rrn",
         "amount": "steps.collection.body.amount | major_to_minor",
         "currency": "steps.collection.body.currency"
       }
     },
-
     "payout": {
       "requests": [
         {
           "name": "payout",
           "method": "post",
-          "path": "/v1/gateway/initiate/payout",
+          "path": "'/v1/gateway/initiate/payout'",
           "auth": "oauth",
           "body": {
             "kind": "json",
-            "template": {
-              "purpose": "payout",
-              "order_id": "{{ payment.token }}",
-              "amount": "{{ payment.gateway_amount | minor_to_major }}",
-              "callback_url": "{{ env.callback_url }}",
-              "description": "{{ payment.product ?? payment.order_number ?? 'Payout' }}",
-              "wallet": "{{ settings.wallet }}",
-              "channel": "{{? params.extra_return_param | null_if('_blank_') ?? settings.channel }}",
-              "data": {
-                "phone_number": "{{ params.phone ?? params.customer.phone }}",
-                "account_name": "{{? [params.first_name ?? params.customer.first_name, params.last_name ?? params.customer.last_name] | join(' ') | trim }}",
-                "code": "{{ settings.code }}"
-              }
-            }
+            "expr": "{\n  \"purpose\": 'payout',\n  \"order_id\": payment.token,\n  \"amount\": payment.gateway_amount | minor_to_major,\n  \"callback_url\": env.callback_url,\n  \"description\": payment.product ?? payment.order_number ?? \"Payout\",\n  \"wallet\": settings.wallet,\n  \"channel\": (params.extra_return_param | null_if(\"_blank_\")) ?? settings.channel,\n  \"data\": {\n    \"phone_number\": params.phone ?? params.customer.phone,\n    \"account_name\": [params.first_name ?? params.customer.first_name, params.last_name ?? params.customer.last_name] | join(\" \") | trim,\n    \"code\": settings.code\n  }\n}"
           },
           "response": { "error": { "message": "resp.body.message", "on_error": "fail" } }
         }
       ],
       "result": {
-        "status": "'pending'",
+        "status": "\"pending\"",
         "gateway_token": "steps.payout.body.rrn",
         "amount": "steps.payout.body.amount | major_to_minor",
         "currency": "steps.payout.body.currency"
       }
     },
-
     "status": {
       "requests": [
         {
           "name": "status",
           "method": "post",
-          "path": "/v1/gateway/transactions/status",
+          "path": "'/v1/gateway/transactions/status'",
           "auth": "oauth",
-          "body": { "kind": "json", "template": { "rrn": "{{ payment.gateway_token }}" } },
+          "body": { "kind": "json", "expr": "{\n  \"rrn\": payment.gateway_token\n}" },
           "response": { "error": { "message": "resp.body.message", "on_error": "fail" } }
         }
       ],
       "result": {
-        "status": "steps.status.body.status | map({ Success: 'approved', Completed: 'approved', Cancelled: 'declined', Failed: 'declined', _default: 'pending' })",
+        "status": "steps.status.body.status | map({ \"Success\": \"approved\", \"Completed\": \"approved\", \"Cancelled\": \"declined\", \"Failed\": \"declined\", \"_default\": \"pending\" })",
         "gateway_token": "payment.gateway_token",
         "amount": "steps.status.body.amount | major_to_minor",
         "currency": "steps.status.body.currency",
         "details": "steps.status.body.narration"
       }
+    }
+  },
+  "callback": {
+    "lookup": "callback.body.rrn",
+    "result": {
+      "status": "callback.body.status | map({ \"Success\": \"approved\", \"Completed\": \"approved\", \"Cancelled\": \"declined\", \"Failed\": \"declined\", \"_default\": \"pending\" })",
+      "amount": "callback.body.amount | major_to_minor",
+      "currency": "callback.body.currency",
+      "details": "callback.body.narration"
     }
   }
 }

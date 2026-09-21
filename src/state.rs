@@ -6,14 +6,17 @@ use axum::extract::FromRef;
 use leptos::prelude::LeptosOptions;
 
 use crate::db::Repo;
+use crate::engine::platform::PlatformConfig;
 use crate::engine::EngineCx;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Public origin the gateway should call back on, e.g.
-    /// `https://gw.example.com`. Combined with the integration key to form
-    /// `env.callback_url`.
+    /// Public origin the gateway should call back on
+    /// Should lead to the hosted integration container
     pub callback_base: String,
+    /// Where gateway callbacks are forwarded. `None` when `SIGN_KEY` is unset,
+    /// in which case every forward fails and the gateway is asked to retry.
+    pub platform: Option<PlatformConfig>,
 }
 
 impl Config {
@@ -25,8 +28,6 @@ impl Config {
     }
 }
 
-/// `LeptosOptions` is pulled out by `FromRef` so `leptos_routes` keeps working
-/// while the router also carries the repo and the engine.
 #[derive(Clone, FromRef)]
 pub struct AppState {
     pub leptos_options: LeptosOptions,
@@ -43,6 +44,7 @@ mod tests {
     fn callback_urls_are_per_integration_and_slash_tolerant() {
         let c = Config {
             callback_base: "https://gw.example.com/".into(),
+            platform: None,
         };
         assert_eq!(
             c.callback_url("scripay"),

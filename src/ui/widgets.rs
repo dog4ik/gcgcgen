@@ -1,21 +1,5 @@
-//! Small shared building blocks for the editor.
-
 use leptos::prelude::*;
 
-/// A text input bound to a value that has to parse — an expression, a
-/// template, a JSON body.
-///
-/// Invalid text stays in the box with the error underneath rather than being
-/// reverted, because reverting throws away what the author was in the middle
-/// of typing. The document is only updated once the text parses.
-///
-/// The element is **uncontrolled**: it is seeded once from `initial` and owns
-/// its text from then on. Writing the value back on every keystroke would put
-/// the caret at the end after each character — assigning `.value` on a
-/// `<textarea>` resets the selection in Chrome even when the string has not
-/// changed. Nothing upstream needs to push text in either: a structural edit
-/// bumps the editor's `rev`, which recreates the whole widget with a fresh
-/// `initial`.
 #[component]
 pub fn ParsedField(
     #[prop(into)] label: String,
@@ -85,7 +69,6 @@ pub fn ParsedField(
     }
 }
 
-/// A plain text input bound to a `String` field.
 #[component]
 pub fn TextField(
     #[prop(into)] label: String,
