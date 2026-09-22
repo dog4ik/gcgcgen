@@ -25,10 +25,6 @@ impl MethodKind {
             MethodKind::Status => "status",
         }
     }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        MethodKind::ALL.into_iter().find(|m| m.as_str() == s)
-    }
 }
 
 impl std::fmt::Display for MethodKind {
@@ -54,10 +50,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_every_variant() {
+    fn every_variant_renders_as_its_wire_name() {
         for m in MethodKind::ALL {
-            assert_eq!(MethodKind::parse(m.as_str()), Some(m));
+            assert_eq!(serde_json::to_string(&m).unwrap(), format!("\"{m}\""));
         }
-        assert_eq!(MethodKind::parse("capture"), None);
     }
 }

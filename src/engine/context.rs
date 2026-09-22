@@ -74,12 +74,10 @@ impl ContextStore {
         (entry.stored_at.elapsed() < self.ttl).then(|| entry.context.clone())
     }
 
+    /// Only the sweep tests can see the map's size from outside.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.inner.lock().expect("context store poisoned").len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 

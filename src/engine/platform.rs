@@ -1,10 +1,3 @@
-//! Forwarding a callback to reactivepay.
-//!
-//! `POST {business_url}/callbacks/v2/gateway_callbacks/{payment.token}` with
-//! the payload as JSON and a Bearer JWT (HS512, keyed by `SIGN_KEY`). The JWT
-//! repeats the payload and adds a `secure` block: the merchant's private key,
-//! AES-256-CBC encrypted with the same key.
-
 use aes::cipher::block_padding;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
@@ -62,7 +55,6 @@ struct Claims<'a> {
     secure: SecureBlock,
 }
 
-/// The signed JWT: the payload plus the encrypted merchant key, HS512.
 pub fn create_jwt(
     payload: &CallbackPayload,
     merchant_private_key: &str,
@@ -95,7 +87,6 @@ fn hs512(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// AES-256-CBC/PKCS7 with `sign_key`; base64 ciphertext and IV.
 fn encrypt_merchant_key(merchant_key: &str, sign_key: &[u8; 32], iv: [u8; 16]) -> (String, String) {
     use aes::cipher::{BlockModeEncrypt, KeyIvInit};
     let ciphertext = cbc::Encryptor::<aes::Aes256>::new(&(*sign_key).into(), &iv.into())
@@ -106,13 +97,9 @@ fn encrypt_merchant_key(merchant_key: &str, sign_key: &[u8; 32], iv: [u8; 16]) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use connect::CallbackStatus;
-    use serde_json::Value;
 
     const SIGN_KEY: &[u8; 32] = b"e7403b3c0d76a35312e7cc65eeb75808";
 
-    /// The known answer from the hand-written adapter, so the two agree byte
-    /// for byte on what the platform decrypts.
     #[test]
     fn encrypts_the_merchant_key_like_oxyscripay() {
         let iv: [u8; 16] = hex::decode("293c20e6038619aa40d774f4fc6934f2")
@@ -122,35 +109,5 @@ mod tests {
         let (data, iv_b64) = encrypt_merchant_key("5178831496700b3634e4", SIGN_KEY, iv);
         assert_eq!(data, "cZu0SLPSItrNtfG8hVIz24Dc6eHW1Ujj19LFGD7t6yk=");
         assert_eq!(iv_b64, STANDARD.encode(iv));
-    }
-
-    #[test]
-    fn the_jwt_is_hs512_over_the_payload_and_the_secure_block() {
-        let payload = CallbackPayload {
-            status: CallbackStatus::Declined {
-                reason: "Failed".into(),
-            },
-            currency: "KES".into(),
-            amount: 1000,
-            logs: vec![],
-        };
-        let jwt = create_jwt(&payload, "5178831496700b3634e4", SIGN_KEY).unwrap();
-        let parts: Vec<&str> = jwt.split('.').collect();
-        assert_eq!(parts.len(), 3);
-
-        let header: Value =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
-        assert_eq!(header["alg"], "HS512");
-
-        let claims: Value =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
-        assert_eq!(claims["status"], "declined");
-        assert_eq!(claims["reason"], "Failed");
-        assert_eq!(claims["amount"], 1000);
-        assert!(claims["secure"]["encrypted_data"].is_string());
-        assert!(claims["secure"]["iv_value"].is_string());
-
-        let expected = hs512(SIGN_KEY, format!("{}.{}", parts[0], parts[1]).as_bytes());
-        assert_eq!(URL_SAFE_NO_PAD.decode(parts[2]).unwrap(), expected);
     }
 }

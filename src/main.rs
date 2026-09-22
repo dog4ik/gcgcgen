@@ -27,6 +27,7 @@ async fn main() -> std::process::ExitCode {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,gcgcgen=debug".into()),
         )
+        .with_ansi(!std::env::var("DISABLE_ANSII").is_ok_and(|v| v == "true"))
         .init();
 
     let conf = get_configuration(Some("./Cargo.toml")).expect("leptos configuration");
@@ -40,8 +41,7 @@ async fn main() -> std::process::ExitCode {
         .unwrap_or_else(|e| panic!("could not open {database_url}: {e}"));
     tracing::info!(%database_url, "storage ready");
 
-    // Where gateways are told to send callbacks. Defaults to the local site so
-    // a dev run is self-consistent; set it to the public origin in deployment.
+    // Where gateways are told to send callbacks
     let callback_base = std::env::var("CALLBACK_BASE").unwrap_or_else(|_| format!("http://{addr}"));
 
     let business_url =

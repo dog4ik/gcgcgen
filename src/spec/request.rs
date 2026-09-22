@@ -12,26 +12,19 @@ pub struct RequestDef {
     pub name: String,
     #[serde(default)]
     pub method: HttpMethod,
-    /// Appended to the integration's `base_url`.
     pub path: Expr,
     #[serde(default)]
     pub auth: Option<AuthId>,
     #[serde(default)]
     pub headers: Vec<NameValue>,
     #[serde(default)]
-    pub query: Vec<NameValue>,
-    #[serde(default)]
     pub body: Body,
-    /// How the body is serialized
     #[serde(default)]
     pub envelope: Envelope,
-    /// Skip this request unless the expression is truthy.
     #[serde(default)]
     pub run_if: Option<Expr>,
     #[serde(default)]
     pub response: ResponseSpec,
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
 }
 
 impl RequestDef {
@@ -42,20 +35,17 @@ impl RequestDef {
             path,
             auth: None,
             headers: Vec::new(),
-            query: Vec::new(),
             body: Body::None,
             envelope: Envelope::Json,
             run_if: None,
             response: ResponseSpec::default(),
-            timeout_ms: None,
         }
     }
 
-    /// Every expression this request owns, outside its response spec.
+    /// Every expression in this request
     pub fn exprs(&self) -> Vec<&Expr> {
         let mut out = vec![&self.path];
         out.extend(self.headers.iter().map(|h| &h.value));
-        out.extend(self.query.iter().map(|q| &q.value));
         match &self.body {
             Body::None => {}
             Body::Json { expr } => out.push(expr),
@@ -64,7 +54,7 @@ impl RequestDef {
     }
 }
 
-/// One header or query parameter. A list, not a map: duplicate names are legal.
+/// One header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NameValue {
@@ -136,8 +126,6 @@ pub struct ResponseSpec {
     #[serde(default)]
     pub success_when: Option<Expr>,
     #[serde(default)]
-    pub success: Option<Expr>,
-    #[serde(default)]
     pub error: ErrorSpec,
 }
 
@@ -146,8 +134,6 @@ pub struct ResponseSpec {
 pub struct ErrorSpec {
     #[serde(default)]
     pub message: Option<Expr>,
-    #[serde(default)]
-    pub code: Option<Expr>,
     #[serde(default)]
     pub on_error: OnError,
 }
@@ -190,7 +176,6 @@ mod tests {
         assert_eq!(r.method, HttpMethod::Post);
         assert_eq!(r.auth.as_ref().unwrap().as_str(), "oauth");
         assert_eq!(r.response.success_when, None);
-        assert!(r.response.success.is_none());
         assert_eq!(r.response.error.on_error, OnError::Fail);
     }
 

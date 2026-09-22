@@ -16,6 +16,7 @@ pub struct CallbackPayload {
 #[serde(rename_all = "lowercase", tag = "status")]
 pub enum CallbackStatus {
     Approved,
+    Refunded,
     Declined { reason: String },
 }
 

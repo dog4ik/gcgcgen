@@ -1,5 +1,3 @@
-//! Shared server state.
-
 use std::sync::Arc;
 
 use axum::extract::FromRef;
@@ -11,11 +9,7 @@ use crate::engine::EngineCx;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Public origin the gateway should call back on
-    /// Should lead to the hosted integration container
     pub callback_base: String,
-    /// Where gateway callbacks are forwarded. `None` when `SIGN_KEY` is unset,
-    /// in which case every forward fails and the gateway is asked to retry.
     pub platform: Option<PlatformConfig>,
 }
 

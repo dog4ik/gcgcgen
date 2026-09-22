@@ -1,15 +1,13 @@
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 
-use crate::model::{IntegrationSummary, VersionInfo};
+use crate::model::IntegrationSummary;
 use crate::spec::{validate, Integration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RepoError {
     #[error("no integration with key `{0}`")]
     NotFound(String),
-    #[error("version {version} of `{key}` does not exist")]
-    NoSuchVersion { key: String, version: i64 },
     #[error("integration is invalid:\n{0}")]
     Invalid(#[from] validate::Report),
     #[error("stored integration `{key}` could not be parsed: {source}")]
@@ -57,7 +55,7 @@ impl Repo {
                     methods: doc
                         .methods
                         .iter()
-                        .filter(|(_, m)| m.enabled && !m.requests.is_empty())
+                        .filter(|(_, m)| !m.requests.is_empty())
                         .map(|(k, _)| *k)
                         .collect(),
                 })
@@ -84,7 +82,7 @@ impl Repo {
 
     /// Validates, then inserts or updates, appending a version row. Returns
     /// the new version number.
-    pub async fn save(&self, doc: &Integration, note: Option<&str>) -> Result<i64, RepoError> {
+    pub async fn save(&self, doc: &Integration) -> Result<i64, RepoError> {
         validate::validate(doc)?;
         let spec = serde_json::to_string_pretty(doc)?;
         let now = now();
@@ -132,14 +130,13 @@ impl Repo {
         };
 
         sqlx::query(
-            "insert into integration_versions (integration_id, version, spec, created_at, note) \
-             values (?, ?, ?, ?, ?)",
+            "insert into integration_versions (integration_id, version, spec, created_at) \
+             values (?, ?, ?, ?)",
         )
         .bind(id)
         .bind(version)
         .bind(&spec)
         .bind(&now)
-        .bind(note)
         .execute(&mut *tx)
         .await?;
 
@@ -156,49 +153,6 @@ impl Repo {
             return Err(RepoError::NotFound(key.to_string()));
         }
         Ok(())
-    }
-
-    pub async fn versions(&self, key: &str) -> Result<Vec<VersionInfo>, RepoError> {
-        let rows = sqlx::query(
-            "select v.version, v.created_at, v.note from integration_versions v \
-             join integrations i on i.id = v.integration_id \
-             where i.key = ? order by v.version desc",
-        )
-        .bind(key)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| VersionInfo {
-                version: r.get("version"),
-                created_at: r.get("created_at"),
-                note: r.get("note"),
-            })
-            .collect())
-    }
-
-    pub async fn load_version(&self, key: &str, version: i64) -> Result<Integration, RepoError> {
-        let row = sqlx::query(
-            "select v.spec from integration_versions v \
-             join integrations i on i.id = v.integration_id \
-             where i.key = ? and v.version = ?",
-        )
-        .bind(key)
-        .bind(version)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| RepoError::NoSuchVersion {
-            key: key.to_string(),
-            version,
-        })?;
-        parse(key, row.get("spec"))
-    }
-
-    /// Republishes an old version as a new one, so history stays append-only.
-    pub async fn rollback(&self, key: &str, version: i64) -> Result<i64, RepoError> {
-        let doc = self.load_version(key, version).await?;
-        self.save(&doc, Some(&format!("rollback to v{version}")))
-            .await
     }
 }
 
@@ -236,8 +190,8 @@ mod tests {
     #[sqlx::test]
     async fn saves_loads_and_lists(pool: SqlitePool) {
         let repo = Repo::new(pool);
-        assert_eq!(repo.save(&doc("a"), None).await.unwrap(), 1);
-        assert_eq!(repo.save(&doc("b"), None).await.unwrap(), 1);
+        assert_eq!(repo.save(&doc("a")).await.unwrap(), 1);
+        assert_eq!(repo.save(&doc("b")).await.unwrap(), 1);
 
         assert_eq!(repo.load("a").await.unwrap().key, "a");
         let list = repo.list().await.unwrap();
@@ -246,50 +200,46 @@ mod tests {
         assert_eq!(list[0].methods, vec![MethodKind::Pay]);
     }
 
-    #[sqlx::test]
-    async fn saving_again_bumps_the_version_and_keeps_history(pool: SqlitePool) {
-        let repo = Repo::new(pool);
-        repo.save(&doc("a"), Some("first")).await.unwrap();
-
-        let mut v2 = doc("a");
-        v2.name = "Renamed".into();
-        assert_eq!(repo.save(&v2, Some("rename")).await.unwrap(), 2);
-
-        assert_eq!(repo.load("a").await.unwrap().name, "Renamed");
-        let versions = repo.versions("a").await.unwrap();
-        assert_eq!(versions.len(), 2);
-        assert_eq!(versions[0].version, 2, "newest first");
-        assert_eq!(versions[0].note.as_deref(), Some("rename"));
-        assert_eq!(repo.load_version("a", 1).await.unwrap().name, "Test");
+    async fn stored_versions(pool: &SqlitePool, key: &str) -> Vec<i64> {
+        sqlx::query(
+            "select v.version from integration_versions v \
+             join integrations i on i.id = v.integration_id \
+             where i.key = ? order by v.version",
+        )
+        .bind(key)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get("version"))
+        .collect()
     }
 
     #[sqlx::test]
-    async fn rollback_appends_rather_than_rewrites(pool: SqlitePool) {
-        let repo = Repo::new(pool);
-        repo.save(&doc("a"), None).await.unwrap();
-        let mut v2 = doc("a");
-        v2.name = "Broken".into();
-        repo.save(&v2, None).await.unwrap();
+    async fn saving_again_bumps_the_version_and_keeps_history(pool: SqlitePool) {
+        let repo = Repo::new(pool.clone());
+        repo.save(&doc("a")).await.unwrap();
 
-        assert_eq!(repo.rollback("a", 1).await.unwrap(), 3);
-        assert_eq!(repo.load("a").await.unwrap().name, "Test");
-        assert_eq!(
-            repo.versions("a").await.unwrap().len(),
-            3,
-            "history is append-only"
-        );
+        let mut v2 = doc("a");
+        v2.name = "Renamed".into();
+        assert_eq!(repo.save(&v2).await.unwrap(), 2);
+
+        assert_eq!(repo.load("a").await.unwrap().name, "Renamed");
+        assert_eq!(repo.list().await.unwrap()[0].version, 2);
+        assert_eq!(stored_versions(&pool, "a").await, [1, 2]);
     }
 
     #[sqlx::test]
     async fn an_invalid_document_is_never_stored(pool: SqlitePool) {
-        let repo = Repo::new(pool);
+        let repo = Repo::new(pool.clone());
         let mut bad = doc("a");
         bad.methods.get_mut(&MethodKind::Pay).unwrap().requests[0].path =
             crate::spec::Expr::literal("https://elsewhere.example/x");
 
-        let err = repo.save(&bad, None).await.unwrap_err();
+        let err = repo.save(&bad).await.unwrap_err();
         assert!(matches!(err, RepoError::Invalid(_)), "{err}");
         assert!(repo.try_load("a").await.unwrap().is_none());
+        assert!(stored_versions(&pool, "a").await.is_empty());
     }
 
     #[sqlx::test]
@@ -301,21 +251,15 @@ mod tests {
             repo.delete("nope").await,
             Err(RepoError::NotFound(_))
         ));
-
-        repo.save(&doc("a"), None).await.unwrap();
-        assert!(matches!(
-            repo.load_version("a", 9).await,
-            Err(RepoError::NoSuchVersion { version: 9, .. })
-        ));
     }
 
     #[sqlx::test]
     async fn deleting_takes_the_history_with_it(pool: SqlitePool) {
-        let repo = Repo::new(pool);
-        repo.save(&doc("a"), None).await.unwrap();
-        repo.save(&doc("a"), None).await.unwrap();
+        let repo = Repo::new(pool.clone());
+        repo.save(&doc("a")).await.unwrap();
+        repo.save(&doc("a")).await.unwrap();
         repo.delete("a").await.unwrap();
-        assert!(repo.versions("a").await.unwrap().is_empty());
         assert!(repo.list().await.unwrap().is_empty());
+        assert!(stored_versions(&pool, "a").await.is_empty());
     }
 }

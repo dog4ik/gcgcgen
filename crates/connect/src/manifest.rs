@@ -1,5 +1,3 @@
-//! The platform's gateway settings payload.
-
 use serde::{Deserialize, Serialize};
 
 use crate::method::MethodKind;
@@ -12,7 +10,7 @@ pub struct Manifest {
     pub settings: Vec<String>,
 }
 
-/// A method's entry in the registration document.
+/// A method in the settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MethodManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -22,9 +20,8 @@ pub struct MethodManifest {
     pub params_fields: Manifest,
 }
 
-/// The registration document posted to the platform's `gateway_settings`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GatewayRegistration {
+pub struct GatewaySettings {
     pub gateway_key: String,
     pub full_link: String,
     pub enable: bool,
@@ -40,7 +37,7 @@ mod tests {
 
     #[test]
     fn serialises_in_the_platform_shape() {
-        let reg = GatewayRegistration {
+        let reg = GatewaySettings {
             gateway_key: "scripay".into(),
             full_link: "http://gcgcgen:4323".into(),
             enable: true,

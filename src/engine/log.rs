@@ -1,6 +1,3 @@
-//! The interaction log returned inline to reactivepay. Every outbound call
-//! produces exactly one entry, auth requests included.
-
 use std::time::Instant;
 
 use serde_json::{Map, Value};
@@ -84,10 +81,6 @@ impl Redactor {
         Self { secrets }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.secrets.is_empty()
-    }
-
     pub fn redact_str(&self, s: &str) -> String {
         let mut out = s.to_string();
         for secret in &self.secrets {
@@ -135,7 +128,6 @@ mod tests {
     fn leaves_short_values_alone() {
         // Masking a two-character code would redact half the document.
         let r = Redactor::new(["ke".to_string(), "true".to_string()]);
-        assert!(r.is_empty());
         assert_eq!(
             r.redact(&json!({"country": "ke"})),
             json!({"country": "ke"})

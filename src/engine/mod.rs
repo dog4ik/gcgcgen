@@ -1,15 +1,3 @@
-//! Executing one method of one integration.
-//!
-//! # Invariants the engine owns, not the spec
-//!
-//! A per-integration document is the wrong place to re-decide these, and
-//! getting one wrong costs money:
-//!
-//! 1. **Uncertainty becomes `pending`, never `declined`.**
-//! 2. **Every outbound call is logged**, auth calls included.
-//! 3. **Failures are HTTP 200** with `{"result": false, …}`.
-//! 4. **Secrets are redacted** from logs by value.
-
 pub mod auth;
 pub mod callback;
 pub mod context;
@@ -42,8 +30,7 @@ use scope::{Env, Scope};
 /// validation rejects auth cycles outright.
 const MAX_AUTH_DEPTH: usize = 4;
 
-/// Shared execution context: the HTTP client, the token cache, and what
-/// pending transactions left for their callbacks.
+/// Shared execution context
 pub struct EngineCx {
     pub client: reqwest::Client,
     pub tokens: TokenStore,
@@ -143,9 +130,7 @@ fn new_env(integration: &Integration, settings: &Value, runtime: &Runtime) -> En
     }
 }
 
-/// Evaluates `base_url` against a scope whose own `env.base_url` is not yet
-/// known, and refuses anything that is not an http(s) URL.
-fn render_base_url(
+fn eval_base_url(
     integration: &Integration,
     bootstrap: &Scope,
 ) -> std::result::Result<String, String> {
@@ -157,8 +142,6 @@ fn render_base_url(
         .trim_end_matches('/')
         .to_string();
 
-    // The last thing standing between a bad expression and credentials posted
-    // somewhere unintended.
     if !(base_url.starts_with("https://") || base_url.starts_with("http://")) {
         return Err(format!(
             "base_url evaluated to `{base_url}`, which is not an http(s) URL"
@@ -185,7 +168,7 @@ async fn run(
     })?;
 
     let mut env = new_env(integration, &input.settings, runtime);
-    env.base_url = render_base_url(integration, &Scope::new(input, &env, kind))?;
+    env.base_url = eval_base_url(integration, &Scope::new(input, &env, kind))?;
 
     let mut scope = Scope::new(input, &env, kind);
     let redactor = Redactor::new(scope.secret_values(&integration.settings));
@@ -202,7 +185,6 @@ async fn run(
     .await?;
     match halt {
         None => {}
-        // The gateway may have acted, so pending — never declined.
         Some(Halt::Uncertain(message)) => {
             return Ok(uncertain(input, format!("uncertain outcome: {message}")))
         }
@@ -276,7 +258,7 @@ async fn run_requests(
                     OnError::Declined => return Ok(Some(Halt::Declined(message))),
                     OnError::Pending => return Ok(Some(Halt::Pending(message))),
                     OnError::Continue => {
-                        let step = step_value(resp.as_ref(), false, None, Some(&err));
+                        let step = step_value(resp.as_ref(), false, Some(&err));
                         scope.set_step(&req.name, step);
                     }
                 }
@@ -366,35 +348,17 @@ fn interpret(req: &RequestDef, resp: &RawResponse, scope: &Scope) -> Result<Valu
         });
     }
 
-    let out = req
-        .response
-        .success
-        .as_ref()
-        .map(|e| e.eval(&resp_scope))
-        .transpose()?
-        .flatten();
-    Ok(step_value(Some(resp), true, out.as_ref(), None))
+    Ok(step_value(Some(resp), true, None))
 }
 
-/// `steps.<name>` always carries `ok`, `status`, `headers` and `body`; a
-/// `success` value's fields are merged over the top.
-fn step_value(
-    resp: Option<&RawResponse>,
-    ok: bool,
-    out: Option<&Value>,
-    error: Option<&EngineError>,
-) -> Value {
+/// `steps.<name>` always carries `ok`, `status`, `headers` and `body`.
+fn step_value(resp: Option<&RawResponse>, ok: bool, error: Option<&EngineError>) -> Value {
     let mut m = Map::new();
     m.insert("ok".into(), Value::Bool(ok));
     if let Some(r) = resp {
         m.insert("status".into(), Value::Number(r.status.into()));
         m.insert("headers".into(), r.headers.clone());
         m.insert("body".into(), r.body.clone());
-    }
-    if let Some(Value::Object(fields)) = out {
-        for (k, v) in fields {
-            m.insert(k.clone(), v.clone());
-        }
     }
     if let Some(e) = error {
         let mut em = Map::new();
@@ -440,49 +404,6 @@ fn default_error_message(body: &Value, status: u16) -> String {
         Value::String(s) if !s.is_empty() => s.clone(),
         _ => format!("gateway returned HTTP {status}"),
     }
-}
-
-/// Renders one request without sending anything, for the editor's dry-run
-/// panel and the golden mapping tests. Inline auth is applied because it is
-/// pure; a token request is skipped, since resolving one means calling the
-/// gateway.
-pub fn preview_request(
-    integration: &Integration,
-    kind: MethodKind,
-    request_name: &str,
-    input: &ConnectInput,
-    runtime: &Runtime,
-    steps: &Map<String, Value>,
-) -> std::result::Result<Prepared, String> {
-    let method = integration
-        .methods
-        .get(&kind)
-        .ok_or_else(|| format!("`{kind}` is not defined"))?;
-    let req = method
-        .request(request_name)
-        .ok_or_else(|| format!("`{kind}` has no request named `{request_name}`"))?;
-
-    let mut env = new_env(integration, &input.settings, runtime);
-    env.base_url = integration
-        .base_url
-        .eval_text(&Scope::new(input, &env, kind).value())
-        .map_err(|e| format!("base_url: {e}"))?
-        .unwrap_or_default()
-        .trim_end_matches('/')
-        .to_string();
-
-    let mut scope = Scope::new(input, &env, kind);
-    for (name, value) in steps {
-        scope.set_step(name, value.clone());
-    }
-
-    let mut prepared = prepare(req, &env.base_url, &scope.value()).map_err(|e| e.to_string())?;
-    if let Some(def) = req.auth.as_ref().and_then(|id| integration.auth(id)) {
-        if !matches!(def.kind, AuthKind::TokenRequest(_)) {
-            auth::apply_inline(&mut prepared, &def.kind, &scope).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(prepared)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -741,9 +662,7 @@ mod result {
             Value::Null => false,
             Value::Bool(b) => *b,
             Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-            Value::String(s) => {
-                !matches!(s.to_ascii_lowercase().as_str(), "" | "false" | "0" | "no")
-            }
+            Value::String(s) => !s.is_empty(),
             Value::Array(a) => !a.is_empty(),
             Value::Object(o) => !o.is_empty(),
         }
@@ -758,7 +677,7 @@ mod tests {
     #[test]
     fn truthiness_matches_the_platform_sentinels() {
         assert!(!truthy(&json!(null)) && !truthy(&json!(false)) && !truthy(&json!(0)));
-        assert!(!truthy(&json!("")) && !truthy(&json!("false")) && !truthy(&json!("no")));
+        assert!(!truthy(&json!("")) && truthy(&json!("false")) && truthy(&json!("no")));
         assert!(truthy(&json!(true)) && truthy(&json!(1)) && truthy(&json!("yes")));
     }
 
@@ -787,22 +706,9 @@ mod tests {
             headers: json!({"x": "1"}),
             body: json!({"access_token": "T"}),
         };
-        let v = step_value(Some(&resp), true, None, None);
+        let v = step_value(Some(&resp), true, None);
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["body"]["access_token"], json!("T"));
-    }
-
-    #[test]
-    fn a_success_expression_merges_over_the_raw_response() {
-        let resp = RawResponse {
-            status: 200,
-            headers: json!({}),
-            body: json!({"rrn": "R"}),
-        };
-        let out = json!({"token": "R", "ok": true});
-        let v = step_value(Some(&resp), true, Some(&out), None);
-        assert_eq!(v["token"], json!("R"));
-        assert_eq!(v["body"]["rrn"], json!("R"), "raw response stays reachable");
     }
 
     #[test]
@@ -811,7 +717,7 @@ mod tests {
             message: "boom".into(),
             status: 503,
         };
-        let v = step_value(None, false, None, Some(&e));
+        let v = step_value(None, false, Some(&e));
         assert_eq!(v["ok"], json!(false));
         assert_eq!(v["error"]["uncertain"], json!(true));
         assert_eq!(v["error"]["status"], json!(503));

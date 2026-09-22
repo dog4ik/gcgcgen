@@ -69,13 +69,6 @@ impl EvalError {
             span,
         }
     }
-
-    pub fn from_parse(e: ExprError) -> Self {
-        Self {
-            message: e.message,
-            span: Some(e.span),
-        }
-    }
 }
 
 impl fmt::Display for EvalError {

@@ -6,7 +6,7 @@ use super::context::CallbackContext;
 use super::log::{InteractionSpan, Redactor};
 use super::result::{build_response, minor_amount, opt_text, truthy};
 use super::scope::Scope;
-use super::{new_env, render_base_url, run_requests, EngineCx, Halt, Runtime};
+use super::{eval_base_url, new_env, run_requests, EngineCx, Halt, Runtime};
 use crate::spec::{CallbackDef, Integration};
 
 /// The callback as it arrived.
@@ -166,7 +166,7 @@ async fn handle(
     // No requests, no base URL needed — and no reason to drop the callback.
     if !cb.requests.is_empty() {
         let bootstrap = Scope::for_callback(&context.settings, callback.clone(), &env);
-        match render_base_url(integration, &bootstrap) {
+        match eval_base_url(integration, &bootstrap) {
             Ok(url) => env.base_url = url,
             Err(e) => return CallbackOutcome::Failed(e),
         }
@@ -235,8 +235,6 @@ fn forward(context: &CallbackContext, payload: CallbackPayload) -> Forward {
     }
 }
 
-/// The payload to forward, or `None` for a pending status. `declined` is a
-/// decline already decided by a request's `on_error`, with its reason.
 fn payload(
     cb: &CallbackDef,
     scope: &Value,
@@ -254,6 +252,7 @@ fn payload(
     let status = match status {
         Status::Pending => return Ok(None),
         Status::Approved => CallbackStatus::Approved,
+        Status::Refunded => CallbackStatus::Refunded,
         Status::Declined => CallbackStatus::Declined {
             reason: details.unwrap_or_else(|| "unspecified reason".into()),
         },

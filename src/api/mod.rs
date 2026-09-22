@@ -208,7 +208,7 @@ mod tests {
         let mut doc: Integration =
             serde_json::from_str(include_str!("../../fixtures/scripay.json")).unwrap();
         doc.base_url = Expr::literal(base_url);
-        repo.save(&doc, None).await.unwrap();
+        repo.save(&doc).await.unwrap();
 
         let state = AppState {
             leptos_options: leptos::prelude::LeptosOptions::builder()
@@ -365,7 +365,7 @@ mod tests {
                           "ack": { "status": 202, "body": "{\"ok\": true}" } }
         }))
         .unwrap();
-        repo.save(&doc, None).await.unwrap();
+        repo.save(&doc).await.unwrap();
         let state = AppState {
             leptos_options: leptos::prelude::LeptosOptions::builder()
                 .output_name("test")

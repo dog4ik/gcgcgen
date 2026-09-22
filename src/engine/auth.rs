@@ -52,10 +52,6 @@ impl TokenStore {
             },
         );
     }
-
-    pub fn invalidate(&self, key: &str) {
-        self.inner.lock().expect("token store poisoned").remove(key);
-    }
 }
 
 /// Builds the cache key for one auth definition.

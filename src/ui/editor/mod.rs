@@ -21,7 +21,7 @@ use crate::spec::auth::{
     TokenRequestAuth,
 };
 use crate::spec::request::{Body, NameValue, OnError};
-use crate::spec::settings::{FieldDef, FieldType};
+use crate::spec::settings::FieldDef;
 use crate::spec::{
     validate, AckDef, CallbackDef, Envelope, Expr, HttpMethod, IframeDef, Integration, MethodDef,
     RedirectDef, RequestDef, ResultMapping,
@@ -149,7 +149,7 @@ fn EditorBody(initial: Integration) -> impl IntoView {
     let save = Action::new(move |_: &()| {
         let current = doc.get_untracked();
         async move {
-            status.set(Some(match save_integration(current, None).await {
+            status.set(Some(match save_integration(current).await {
                 Ok(v) => Ok(format!("saved as v{v}")),
                 Err(e) => Err(e.to_string()),
             }));

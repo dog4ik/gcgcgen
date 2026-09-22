@@ -90,7 +90,6 @@ pub fn default_method(kind: MethodKind) -> MethodDef {
         MethodKind::Pay => "charge",
     };
     MethodDef {
-        enabled: true,
         requests: vec![RequestDef::new(
             name,
             Expr::parse("/").expect("static expression"),

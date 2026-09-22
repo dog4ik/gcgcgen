@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use serde_json::{Map, Value};
 
 use super::error::{EngineError, Result};
@@ -15,7 +13,6 @@ pub struct Prepared {
     pub query: Vec<(String, String)>,
     pub headers: Vec<(String, String)>,
     pub body: PreparedBody,
-    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,7 +24,7 @@ pub enum PreparedBody {
 
 impl Prepared {
     /// URL without the query string.
-    pub fn url(&self) -> String {
+    fn url(&self) -> String {
         format!("{}{}", self.base_url, self.path)
     }
 
@@ -123,10 +120,6 @@ impl Prepared {
         }
     }
 
-    /// Writes a value into the JSON body at a dotted path, creating objects on
-    /// the way down. Used by `SigPlacement::BodyField`.
-    /// A form body gets the flattened key instead: `auth.sig` becomes
-    /// `auth[sig]`, matching how nested objects are form-encoded.
     pub fn set_body_field(&mut self, path: &str, value: Value) -> Result<()> {
         if let PreparedBody::Form(fields) = &mut self.body {
             let mut segs = path.split('.').filter(|s| !s.is_empty());
@@ -215,13 +208,6 @@ pub fn prepare(req: &RequestDef, base_url: &str, scope: &Value) -> Result<Prepar
         }
     }
 
-    let mut query = Vec::new();
-    for q in &req.query {
-        if let Some(v) = q.value.eval_text(scope)? {
-            query.push((q.name.clone(), v));
-        }
-    }
-
     // Evaluating to nothing sends nothing.
     let body = match &req.body {
         Body::None => PreparedBody::None,
@@ -238,10 +224,9 @@ pub fn prepare(req: &RequestDef, base_url: &str, scope: &Value) -> Result<Prepar
         method: req.method,
         path,
         base_url: base_url.trim_end_matches('/').to_string(),
-        query,
+        query: Vec::new(),
         headers,
         body,
-        timeout: req.timeout_ms.map(Duration::from_millis),
     })
 }
 
@@ -318,10 +303,6 @@ pub async fn send(client: &reqwest::Client, prepared: &Prepared) -> Result<RawRe
             let _ = fields;
         }
     }
-    if let Some(t) = prepared.timeout {
-        builder = builder.timeout(t);
-    }
-
     let resp = builder
         .send()
         .await
@@ -372,12 +353,11 @@ mod tests {
     }
 
     #[test]
-    fn evaluates_path_headers_query_and_json_body() {
+    fn evaluates_path_headers_and_json_body() {
         let r = req(r#"{
             "name": "c", "method": "post", "path": "'/v1/pay/' + payment.token",
             "headers": [{"name": "X-Key", "value": "settings.key"},
                         {"name": "X-Skip", "value": "payment.nope"}],
-            "query":   [{"name": "w", "value": "settings.wallet"}],
             "body": {"kind": "json", "expr":
                 "{\"amount\": payment.gateway_amount | minor_to_major, \"drop\": payment.nope}"}
         }"#);
@@ -387,7 +367,7 @@ mod tests {
         // The header whose value is absent is gone, not empty.
         assert_eq!(p.headers, vec![("X-Key".to_string(), "k".to_string())]);
         assert_eq!(p.body, PreparedBody::Json(json!({"amount": 10})));
-        assert_eq!(p.full_url(), "https://api.example.com/v1/pay/tok 1?w=w1");
+        assert_eq!(p.full_url(), "https://api.example.com/v1/pay/tok 1");
         assert_eq!(p.body_raw(), r#"{"amount":10}"#);
     }
 
@@ -449,11 +429,10 @@ mod tests {
 
     #[test]
     fn req_scope_exposes_the_signable_surface() {
-        let r = req(
-            r#"{"name":"c","path":"'/p'","query":[{"name":"q","value":"'1'"}],
-                        "body":{"kind":"json","expr":"{\"a\": 1}"}}"#,
-        );
-        let p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        let r = req(r#"{"name":"c","path":"'/p'","body":{"kind":"json","expr":"{\"a\": 1}"}}"#);
+        let mut p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        // Only an auth placement puts anything in the query string now.
+        p.set_query("q", "1".into());
         let s = p.req_scope();
         assert_eq!(s["method"], json!("POST"));
         assert_eq!(s["path"], json!("/p"));

@@ -18,7 +18,7 @@ pub fn IntegrationList() -> impl IntoView {
     let error = RwSignal::new(None::<String>);
 
     let create = Action::new(move |_: &()| async move {
-        match save_integration(starter(), Some("created".into())).await {
+        match save_integration(starter()).await {
             Ok(_) => Some(starter().key),
             Err(e) => {
                 error.set(Some(e.to_string()));
@@ -180,7 +180,7 @@ pub fn starter() -> Integration {
         "name": "New integration",
         "base_url": "'https://api.example.com'",
         "settings": { "fields": [
-            { "name": "api_key", "required": true, "secret": true }
+            { "name": "api_key", "secret": true }
         ] },
         "auths": [],
         "methods": { "pay": {

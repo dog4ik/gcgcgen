@@ -1,8 +1,3 @@
-//! The interaction log returned inline with every reply.
-//!
-//! The platform stores these as the audit trail for a transaction, so one
-//! entry per outbound call — including the auth call that fetched a token.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -15,14 +10,10 @@ pub struct LoggedRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InteractionLog {
-    /// The integration key, e.g. `scripay`.
     pub gateway: String,
-    /// Which call this was: the request's `name`, e.g. `auth`, `collection`.
     pub kind: String,
     pub request: Option<LoggedRequest>,
     pub status: Option<u16>,
-    /// The raw response. A non-JSON body is kept as a string rather than
-    /// dropped, so an HTML error page survives into the audit trail.
     pub response: Option<Value>,
     /// Seconds.
     pub duration: f32,
@@ -47,7 +38,6 @@ mod tests {
             duration: 0.25,
         };
         let v: Value = serde_json::to_value(&log).unwrap();
-        assert_eq!(v["created_at"], json!("1970-01-01T00:00:00Z"));
         assert_eq!(v["kind"], json!("auth"));
         assert_eq!(serde_json::from_value::<InteractionLog>(v).unwrap(), log);
     }

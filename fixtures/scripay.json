@@ -1,16 +1,28 @@
 {
   "key": "scripay",
   "name": "Scripay",
-  "description": "Kenyan mobile-money collections and payouts. Reproduces the hand-written oxyscripay adapter as a spec document.",
   "base_url": "settings.sandbox | to_bool | map({\"true\": \"https://api-sandbox.scripay.com\", \"_default\": \"https://api.scripay.com\"})",
   "settings": {
     "fields": [
-      { "name": "sandbox", "ty": { "kind": "bool" } },
-      { "name": "client_id", "required": true },
-      { "name": "client_secret", "required": true, "secret": true },
-      { "name": "wallet", "required": true },
-      { "name": "code", "required": true },
-      { "name": "channel" }
+      {
+        "name": "sandbox"
+      },
+      {
+        "name": "client_id"
+      },
+      {
+        "name": "client_secret",
+        "secret": true
+      },
+      {
+        "name": "wallet"
+      },
+      {
+        "name": "code"
+      },
+      {
+        "name": "channel"
+      }
     ]
   },
   "auths": [
@@ -25,14 +37,20 @@
           "kind": "json",
           "expr": "{\n  \"client_id\": settings.client_id,\n  \"client_secret\": settings.client_secret\n}"
         },
-        "response": { "error": { "message": "resp.body.message" } }
+        "response": {
+          "error": {
+            "message": "resp.body.message"
+          }
+        }
       },
       "token": "resp.body.access_token",
       "expires_in": "resp.body.expires_in",
       "default_ttl_secs": 3600,
       "refresh_buffer_secs": 300,
       "cache_key": ["settings.client_id", "settings.sandbox"],
-      "placement": { "kind": "bearer" }
+      "placement": {
+        "kind": "bearer"
+      }
     }
   ],
   "methods": {
@@ -47,7 +65,12 @@
             "kind": "json",
             "expr": "{\n  \"purpose\": 'payment',\n  \"order_id\": payment.token,\n  \"amount\": payment.gateway_amount | minor_to_major,\n  \"callback_url\": env.callback_url,\n  \"description\": payment.product ?? payment.order_number ?? \"Payment\",\n  \"wallet\": settings.wallet,\n  \"channel\": (params.extra_return_param | null_if(\"_blank_\")) ?? settings.channel,\n  \"data\": {\n    \"phone_number\": params.phone ?? params.customer.phone,\n    \"account_name\": [params.first_name ?? params.customer.first_name, params.last_name ?? params.customer.last_name] | join(\" \") | trim,\n    \"code\": settings.code\n  }\n}"
           },
-          "response": { "error": { "message": "resp.body.message", "on_error": "fail" } }
+          "response": {
+            "error": {
+              "message": "resp.body.message",
+              "on_error": "fail"
+            }
+          }
         }
       ],
       "result": {
@@ -68,7 +91,12 @@
             "kind": "json",
             "expr": "{\n  \"purpose\": 'payout',\n  \"order_id\": payment.token,\n  \"amount\": payment.gateway_amount | minor_to_major,\n  \"callback_url\": env.callback_url,\n  \"description\": payment.product ?? payment.order_number ?? \"Payout\",\n  \"wallet\": settings.wallet,\n  \"channel\": (params.extra_return_param | null_if(\"_blank_\")) ?? settings.channel,\n  \"data\": {\n    \"phone_number\": params.phone ?? params.customer.phone,\n    \"account_name\": [params.first_name ?? params.customer.first_name, params.last_name ?? params.customer.last_name] | join(\" \") | trim,\n    \"code\": settings.code\n  }\n}"
           },
-          "response": { "error": { "message": "resp.body.message", "on_error": "fail" } }
+          "response": {
+            "error": {
+              "message": "resp.body.message",
+              "on_error": "fail"
+            }
+          }
         }
       ],
       "result": {
@@ -85,8 +113,16 @@
           "method": "post",
           "path": "'/v1/gateway/transactions/status'",
           "auth": "oauth",
-          "body": { "kind": "json", "expr": "{\n  \"rrn\": payment.gateway_token\n}" },
-          "response": { "error": { "message": "resp.body.message", "on_error": "fail" } }
+          "body": {
+            "kind": "json",
+            "expr": "{\n  \"rrn\": payment.gateway_token\n}"
+          },
+          "response": {
+            "error": {
+              "message": "resp.body.message",
+              "on_error": "fail"
+            }
+          }
         }
       ],
       "result": {

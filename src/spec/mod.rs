@@ -17,7 +17,7 @@ pub use auth::{AuthDef, AuthId, AuthKind};
 pub use callback::{AckDef, CallbackDef};
 pub use expr::{EvalError, Expr, ExprError};
 pub use request::{Body, Envelope, HttpMethod, NameValue, OnError, RequestDef, ResponseSpec};
-pub use settings::{FieldDef, FieldType, SettingsSchema};
+pub use settings::{FieldDef, SettingsSchema};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,9 +25,6 @@ pub struct Integration {
     /// URL segment for the integration
     pub key: String,
     pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Prefix for every request path. May branch on `settings.sandbox`.
     pub base_url: Expr,
     #[serde(default)]
     pub settings: SettingsSchema,
@@ -35,7 +32,6 @@ pub struct Integration {
     pub auths: Vec<AuthDef>,
     #[serde(default)]
     pub methods: BTreeMap<MethodKind, MethodDef>,
-    /// How the gateway's asynchronous callback is read and forwarded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback: Option<CallbackDef>,
 }
@@ -46,11 +42,11 @@ impl Integration {
     }
 
     pub fn method(&self, kind: MethodKind) -> Option<&MethodDef> {
-        self.methods.get(&kind).filter(|m| m.enabled)
+        self.methods.get(&kind)
     }
 
     pub fn callback(&self) -> Option<&CallbackDef> {
-        self.callback.as_ref().filter(|c| c.enabled)
+        self.callback.as_ref()
     }
 
     /// Should we store the additional context for callback?
@@ -98,23 +94,13 @@ fn first_segments(exprs: &[&Expr], root: &str) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MethodDef {
-    #[serde(default = "yes")]
-    pub enabled: bool,
-    /// Executed in order
+    /// All requests that are executed in order
     #[serde(default)]
     pub requests: Vec<RequestDef>,
     pub result: ResultMapping,
 }
 
-pub(crate) fn yes() -> bool {
-    true
-}
-
 impl MethodDef {
-    pub fn request(&self, name: &str) -> Option<&RequestDef> {
-        self.requests.iter().find(|r| r.name == name)
-    }
-
     /// Every expression reachable from this method, auth included.
     pub fn collect_exprs<'a>(&'a self, integration: &'a Integration, out: &mut Vec<&'a Expr>) {
         let mut seen_auth: BTreeSet<&AuthId> = BTreeSet::new();
@@ -136,9 +122,7 @@ fn collect_request_exprs<'a>(
         out.push(e);
     }
     out.extend(req.response.success_when.iter());
-    out.extend(req.response.success.iter());
     out.extend(req.response.error.message.iter());
-    out.extend(req.response.error.code.iter());
 
     let Some(id) = &req.auth else { return };
     // Guard against a cyclic auth graph; `validate` rejects one outright, but
@@ -174,7 +158,7 @@ fn collect_request_exprs<'a>(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResultMapping {
-    /// Must evaluate to `approved`, `declined` or `pending`.
+    /// Must evaluate to gc status.
     pub status: Expr,
     #[serde(default)]
     pub gateway_token: Option<Expr>,
@@ -204,10 +188,6 @@ impl ResultMapping {
     }
 }
 
-/// The authored form of [`RedirectRequest`]: the same variants, with
-/// expressions where the contract has strings. An absent url drops the whole
-/// block, so one document serves both a hosted checkout and a straight-through
-/// charge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RedirectDef {

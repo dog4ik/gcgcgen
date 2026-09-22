@@ -1,6 +1,3 @@
-//! Authentication, defined once per integration and referenced by requests, so
-//! that pay, payout, refund and status share one cached token.
-
 use serde::{Deserialize, Serialize};
 
 use super::expr::Expr;
@@ -51,7 +48,7 @@ pub enum AuthKind {
         username: Expr,
         password: Expr,
     },
-    /// A fixed header, e.g. `X-Api-Key: settings.api_key`.
+    /// A fixed header (`X-Api-Key: settings.api_key`).
     Header {
         name: String,
         value: Expr,
@@ -60,11 +57,7 @@ pub enum AuthKind {
         name: String,
         value: Expr,
     },
-    /// A digest over a canonical string assembled from the pending request,
-    /// which additionally sees a `req` root.
     Signature(Box<SignatureAuth>),
-    /// Runs a request to obtain a token, caches it, and places it on the
-    /// requests that reference this auth.
     TokenRequest(Box<TokenRequestAuth>),
 }
 
@@ -124,21 +117,16 @@ pub enum SigPlacement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenRequestAuth {
-    /// Executed like any other request, including its own log entry.
     pub request: RequestDef,
-    /// Evaluated against the auth response scope, e.g. `resp.body.access_token`.
     pub token: Expr,
-    /// Lifetime in seconds, e.g. `resp.body.expires_in`.
     #[serde(default)]
     pub expires_in: Option<Expr>,
     #[serde(default = "default_ttl")]
     pub default_ttl_secs: u64,
-    /// Refresh this many seconds before expiry.
     #[serde(default = "default_refresh_buffer")]
     pub refresh_buffer_secs: u64,
     /// Settings-derived values that partition the cache. Without one, two
-    /// merchants on the same integration would share a token, so
-    /// [`super::validate`] rejects an empty list.
+    /// merchants on the same integration would share a token
     pub cache_key: Vec<Expr>,
     pub placement: TokenPlacement,
 }

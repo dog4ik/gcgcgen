@@ -1,13 +1,9 @@
-//! Scope construction: what an expression can see, and when.
-
 use serde_json::{Map, Value};
 
 use crate::spec::MethodKind;
 pub use connect::ConnectInput;
 
-/// Runtime facts injected under the `env` root. Time is passed in rather than
-/// read from the clock inside the evaluator, which keeps expression evaluation
-/// pure and makes the browser preview reproducible.
+/// Runtime facts injected under the `env` root.
 #[derive(Debug, Clone)]
 pub struct Env {
     pub integration_key: String,
@@ -63,8 +59,7 @@ impl Scope {
         Self { root }
     }
 
-    /// A callback's scope: the settings kept from the original payment, the
-    /// inbound callback, and nothing of reactivepay's other buckets.
+    /// A callback scope
     pub fn for_callback(settings: &Value, callback: Value, env: &Env) -> Self {
         let mut root = Map::new();
         root.insert("settings".into(), settings.clone());
@@ -99,10 +94,6 @@ impl Scope {
             unreachable!("steps is seeded as an object in `new`")
         };
         steps.insert(name.to_string(), value);
-    }
-
-    pub fn step(&self, name: &str) -> Option<&Value> {
-        self.root.get("steps")?.get(name)
     }
 
     /// The scope a response spec sees: everything above plus `resp`.
@@ -181,7 +172,7 @@ mod tests {
             json!("R1")
         );
         s.set_step("transfer", json!({"ok": true}));
-        assert!(s.step("enquiry").is_some() && s.step("transfer").is_some());
+        assert_eq!(s.value()["steps"]["transfer"]["ok"], json!(true));
     }
 
     #[test]
@@ -222,7 +213,10 @@ mod tests {
         let schema = SettingsSchema {
             fields: vec![
                 FieldDef::new("client_id"),
-                FieldDef::new("client_secret").secret(),
+                FieldDef {
+                    name: "client_secret".into(),
+                    secret: true,
+                },
             ],
         };
         let s = Scope::new(&input(), &env(), MethodKind::Pay);

@@ -1,16 +1,12 @@
-//! The outbound response envelope.
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::log::InteractionLog;
 use crate::status::Status;
 
-/// The transaction facts, flattened into a successful reply.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransactionResponse {
     pub status: Status,
-    /// The gateway's identifier for the transaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_token: Option<String>,
     /// Minor units.
@@ -26,7 +22,6 @@ pub struct TransactionResponse {
     pub requisites: Option<Map<String, Value>>,
 }
 
-/// The handover to the gateway's own page.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RedirectRequest {
@@ -80,11 +75,9 @@ impl TransactionResponse {
     }
 }
 
-/// What the platform receives.
-///
-/// Response should always be sent with HTTP 200
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum ConnectResponse {
     Success(SuccessResponse),
     Failure(FailureResponse),
@@ -122,10 +115,6 @@ impl ConnectResponse {
             error: error.into(),
             logs,
         })
-    }
-
-    pub fn is_success(&self) -> bool {
-        matches!(self, ConnectResponse::Success(_))
     }
 
     pub fn logs(&self) -> &[InteractionLog] {
@@ -232,7 +221,6 @@ mod tests {
             serde_json::to_value(&r).unwrap(),
             json!({"result": false, "error": "gateway said no", "logs": []})
         );
-        assert!(!r.is_success());
     }
 
     #[test]

@@ -1,10 +1,8 @@
-//! The canonical outcome vocabulary.
-
 use serde::{Deserialize, Serialize};
 
 /// The only three outcomes the platform understands.
 ///
-/// uncertain failure: a transport error, a 5xx, an unparseable body must become [`Status::Pending`]
+/// uncertain failure: a transport error, a 5xx, an unparsable body must become [`Status::Pending`]
 /// because the gateway may have taken the money.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -12,16 +10,23 @@ pub enum Status {
     Approved,
     Declined,
     Pending,
+    Refunded,
 }
 
 impl Status {
-    pub const ALL: [Status; 3] = [Status::Approved, Status::Declined, Status::Pending];
+    pub const ALL: [Status; 4] = [
+        Status::Approved,
+        Status::Declined,
+        Status::Pending,
+        Status::Refunded,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Approved => "approved",
             Status::Declined => "declined",
             Status::Pending => "pending",
+            Status::Refunded => "refunded",
         }
     }
 
@@ -58,6 +63,7 @@ mod tests {
     fn only_pending_is_non_final() {
         assert!(Status::Approved.is_final());
         assert!(Status::Declined.is_final());
+        assert!(!Status::Pending.is_final());
         assert!(!Status::Pending.is_final());
     }
 }

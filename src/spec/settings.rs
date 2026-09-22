@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -9,14 +8,6 @@ pub struct SettingsSchema {
 }
 
 impl SettingsSchema {
-    pub fn get(&self, name: &str) -> Option<&FieldDef> {
-        self.fields.iter().find(|f| f.name == name)
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.fields.iter().map(|f| f.name.as_str())
-    }
-
     /// Field names for the platform's `params_fields.settings` manifest.
     pub fn manifest(&self) -> Vec<String> {
         self.fields.iter().map(|f| f.name.clone()).collect()
@@ -26,53 +17,20 @@ impl SettingsSchema {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldDef {
-    /// Key within the inbound `settings` object.
+    /// Key within the gc `settings` object.
     pub name: String,
-    #[serde(default)]
-    pub ty: FieldType,
-    #[serde(default)]
-    pub required: bool,
     /// Masked in the editor and redacted from interaction logs.
     #[serde(default)]
     pub secret: bool,
-    #[serde(default)]
-    pub default: Option<Value>,
 }
 
 impl FieldDef {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            ty: FieldType::Text,
-            required: false,
             secret: false,
-            default: None,
         }
     }
-
-    pub fn required(mut self) -> Self {
-        self.required = true;
-        self
-    }
-
-    pub fn secret(mut self) -> Self {
-        self.secret = true;
-        self
-    }
-
-    pub fn ty(mut self, ty: FieldType) -> Self {
-        self.ty = ty;
-        self
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum FieldType {
-    #[default]
-    Text,
-    Number,
-    Bool,
 }
 
 #[cfg(test)]
@@ -83,9 +41,11 @@ mod tests {
     fn round_trips() {
         let schema = SettingsSchema {
             fields: vec![
-                FieldDef::new("client_id").required(),
-                FieldDef::new("client_secret").required().secret(),
-                FieldDef::new("sandbox").ty(FieldType::Bool),
+                FieldDef::new("client_id"),
+                FieldDef {
+                    name: "client_secret".into(),
+                    secret: true,
+                },
             ],
         };
         let json = serde_json::to_string(&schema).unwrap();
@@ -93,7 +53,7 @@ mod tests {
             serde_json::from_str::<SettingsSchema>(&json).unwrap(),
             schema
         );
-        assert_eq!(schema.manifest(), ["client_id", "client_secret", "sandbox"]);
+        assert_eq!(schema.manifest(), ["client_id", "client_secret"]);
     }
 
     #[test]

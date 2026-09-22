@@ -312,7 +312,7 @@ impl<'a> Validator<'a> {
         for (i, req) in requests.iter().enumerate() {
             let loc = format!("{base}.requests[{i}]");
             if req.name.trim().is_empty() {
-                self.issue(&loc, "name must not be empty — it addresses `steps.<name>`");
+                self.issue(&loc, "name must not be empty, it addresses `steps.<name>`");
             } else if !req
                 .name
                 .chars()
@@ -346,7 +346,7 @@ impl<'a> Validator<'a> {
         {
             self.issue(
                 base,
-                "a callback needs a `pay` or `payout` method — that is where its context is kept",
+                "a callback needs a `pay` or `payout` method, that is where its context is kept",
             );
         }
         self.check_expr(&cb.lookup, LOOKUP_ROOTS, &format!("{base}.lookup"));
@@ -379,7 +379,7 @@ impl<'a> Validator<'a> {
         if r.currency.is_none() {
             self.issue(
                 format!("{loc}.currency"),
-                "required — the platform needs the settled currency",
+                "required: the platform needs the settled currency",
             );
         }
         for (field, set) in [
@@ -390,7 +390,7 @@ impl<'a> Validator<'a> {
             if set {
                 self.issue(
                     format!("{loc}.{field}"),
-                    "not part of a callback — remove it",
+                    "not part of a callback, remove it",
                 );
             }
         }
@@ -430,16 +430,7 @@ impl<'a> Validator<'a> {
         if let Some(e) = &req.response.success_when {
             self.check_expr(e, &resp_roots, &resp_loc);
         }
-        if let Some(e) = &req.response.success {
-            self.check_expr(e, &resp_roots, &resp_loc);
-        }
-        for e in req
-            .response
-            .error
-            .message
-            .iter()
-            .chain(req.response.error.code.iter())
-        {
+        for e in req.response.error.message.iter() {
             self.check_expr(e, &resp_roots, &resp_loc);
         }
     }
@@ -464,7 +455,7 @@ impl<'a> Validator<'a> {
                 self.issue_at(
                     format!("{loc}.status"),
                     format!(
-                        "`{lit}` is not a status — expected one of {}",
+                        "`{lit}` is not a status, expected one of {}",
                         Status::ALL.map(|s| s.as_str()).join(", ")
                     ),
                     Span::new(0, result.status.src().len()),
@@ -481,7 +472,7 @@ impl<'a> Validator<'a> {
                 self.issue_at(
                     loc,
                     format!(
-                        "unknown root `{root}` here — available: {}",
+                        "unknown root `{root}` here, available: {}",
                         roots.join(", ")
                     ),
                     whole,
@@ -523,7 +514,7 @@ impl<'a> Validator<'a> {
                             available.iter().cloned().collect::<Vec<_>>().join(", ")
                         )
                     };
-                    self.issue_at(loc, format!("`steps.{name}` — {hint}"), span);
+                    self.issue_at(loc, format!("`steps.{name}`, {hint}"), span);
                 }
             }
         }

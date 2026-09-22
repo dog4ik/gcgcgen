@@ -71,7 +71,6 @@ pub fn CallbackTab(doc: RwSignal<Integration>, rev: RwSignal<u32>) -> impl IntoV
 
 pub fn default_callback() -> CallbackDef {
     CallbackDef {
-        enabled: true,
         lookup: Expr::parse("callback.body.order_id").expect("static expression"),
         verify: None,
         requests: Vec::new(),
