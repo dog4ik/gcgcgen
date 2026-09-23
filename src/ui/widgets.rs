@@ -35,6 +35,7 @@ pub fn ParsedField(
                 placeholder=placeholder
                 prop:value=initial
                 on:input:target=move |e| on_input(e.target().value())
+                spellcheck="false"
             />
         }
         .into_any()

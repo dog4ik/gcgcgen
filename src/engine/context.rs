@@ -11,6 +11,10 @@ const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub struct CallbackContext {
     /// The platform's payment token: the forward's URL path segment.
     pub token: String,
+    /// The platform's currency
+    pub gateway_currency: String,
+    /// The platform's amount kept in minor units
+    pub gateway_amount: usize,
     /// Encrypted into the forward's JWT.
     pub merchant_private_key: String,
     /// The merchant's credentials, for the callback's own requests.
@@ -58,8 +62,10 @@ impl ContextStore {
             map.retain(|_, e| now.duration_since(e.stored_at) < self.ttl);
         }
         for id in ids.into_iter().filter(|id| !id.is_empty()) {
+            let key = key(integration_key, id);
+            tracing::debug!(%key, "Saving callback context");
             map.insert(
-                key(integration_key, id),
+                key,
                 Entry {
                     context: context.clone(),
                     stored_at: now,
@@ -70,7 +76,9 @@ impl ContextStore {
 
     pub fn get(&self, integration_key: &str, id: &str) -> Option<Arc<CallbackContext>> {
         let map = self.inner.lock().expect("context store poisoned");
-        let entry = map.get(&key(integration_key, id))?;
+        let key = key(integration_key, id);
+        tracing::debug!(%key, "Retrieving callback context");
+        let entry = map.get(&key)?;
         (entry.stored_at.elapsed() < self.ttl).then(|| entry.context.clone())
     }
 
@@ -93,7 +101,9 @@ mod tests {
     fn ctx(token: &str) -> CallbackContext {
         CallbackContext {
             token: token.into(),
-            merchant_private_key: "mpk".into(),
+            merchant_private_key: "test_private_key".into(),
+            gateway_amount: 100,
+            gateway_currency: "RUB".into(),
             settings: json!({"client_id": "c"}),
         }
     }

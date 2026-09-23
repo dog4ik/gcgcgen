@@ -6,6 +6,7 @@ use connect::MethodKind;
 
 use crate::server_fns::{delete_integration, list_integrations, save_integration};
 use crate::spec::Integration;
+use crate::ui::editor::Part;
 use crate::ui::widgets::Button;
 
 #[component]
@@ -127,8 +128,15 @@ pub fn IntegrationList() -> impl IntoView {
                                                         key=|m| *m
                                                         let:m
                                                     >
-                                                        <MethodChip kind=m />
+                                                        <MethodChip kind=Part::Method(m) />
                                                     </For>
+                                                    <Show
+                                                        when={
+                                                            move || row.callback_defined
+                                                        }
+                                                    >
+                                                        <MethodChip kind=Part::Callback />
+                                                    </Show>
                                                 </div>
                                                 <span class="w-20 shrink-0 text-right font-mono text-xs text-slate-600">
                                                     {format!("v{}", row.version)}
@@ -158,12 +166,13 @@ pub fn IntegrationList() -> impl IntoView {
 }
 
 #[component]
-pub fn MethodChip(kind: MethodKind) -> impl IntoView {
+pub fn MethodChip(kind: Part) -> impl IntoView {
     let tone = match kind {
-        MethodKind::Pay => "bg-emerald-950 text-emerald-300 border-emerald-900",
-        MethodKind::Payout => "bg-amber-950 text-amber-300 border-amber-900",
-        MethodKind::Refund => "bg-violet-950 text-violet-300 border-violet-900",
-        MethodKind::Status => "bg-sky-950 text-sky-300 border-sky-900",
+        Part::Method(MethodKind::Pay) => "bg-emerald-950 text-emerald-300 border-emerald-900",
+        Part::Method(MethodKind::Payout) => "bg-amber-950 text-amber-300 border-amber-900",
+        Part::Method(MethodKind::Refund) => "bg-violet-950 text-violet-300 border-violet-900",
+        Part::Method(MethodKind::Status) => "bg-sky-950 text-sky-300 border-sky-900",
+        Part::Callback => "bg-red-950 text-red-300 border-red-900",
     };
     view! {
         <span class=format!(

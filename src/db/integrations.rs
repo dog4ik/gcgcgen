@@ -58,6 +58,7 @@ impl Repo {
                         .filter(|(_, m)| !m.requests.is_empty())
                         .map(|(k, _)| *k)
                         .collect(),
+                    callback_defined: doc.callback.is_some(),
                 })
             })
             .collect()

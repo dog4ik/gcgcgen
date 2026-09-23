@@ -32,7 +32,7 @@ pub fn MethodTab(
                 let n = m.requests.len() + 1;
                 m.requests.push(RequestDef::new(
                     format!("step{n}"),
-                    Expr::parse("/").expect("static expression"),
+                    Expr::parse("'/'").expect("static expression"),
                 ));
             }
         });
@@ -92,7 +92,7 @@ pub fn default_method(kind: MethodKind) -> MethodDef {
     MethodDef {
         requests: vec![RequestDef::new(
             name,
-            Expr::parse("/").expect("static expression"),
+            Expr::parse("'/'").expect("static expression"),
         )],
         result: ResultMapping {
             status: Expr::parse("\"pending\"").expect("static expression"),

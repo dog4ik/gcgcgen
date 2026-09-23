@@ -16,7 +16,14 @@ use super::{CallbackDef, Integration, MethodDef, MethodKind, ResultMapping, Stat
 
 /// Roots available to a request's own expressions.
 const REQUEST_ROOTS: &[&str] = &[
-    "payment", "params", "refund", "settings", "steps", "env", "method",
+    "payment",
+    "params",
+    "refund",
+    "settings",
+    "steps",
+    "env",
+    "method",
+    "processing_url",
 ];
 /// Roots available while interpreting a response.
 const RESPONSE_ROOTS: &[&str] = &[
@@ -28,7 +35,15 @@ const SIGNATURE_ROOTS: &[&str] = &[
 ];
 /// Roots available inside a callback: the stored settings plus the inbound
 /// callback. The payment, params and refund buckets are not kept.
-const CALLBACK_ROOTS: &[&str] = &["settings", "steps", "env", "method", "callback"];
+const CALLBACK_ROOTS: &[&str] = &[
+    "settings",
+    "steps",
+    "env",
+    "method",
+    "callback",
+    "gateway_amount",
+    "gateway_currency",
+];
 /// A callback's `lookup` runs before the stored context is found.
 const LOOKUP_ROOTS: &[&str] = &["callback", "env"];
 /// A cache key must be derivable before anything runs.
@@ -784,6 +799,17 @@ mod tests {
             "{e}"
         );
         assert!(e.contains("callback.result: unknown root `payment`"), "{e}");
+    }
+
+    #[test]
+    fn null_and_void_are_literals_not_roots() {
+        let d = with_callback(
+            r#"{ "lookup": "callback.body.rrn",
+                 "verify": "callback.body.sig != null && callback.body.err == void",
+                 "result": { "status": "\"approved\"", "amount": "callback.body.amount",
+                             "currency": "callback.body.currency" } }"#,
+        );
+        validate(&d).unwrap();
     }
 
     #[test]

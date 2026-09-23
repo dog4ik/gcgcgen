@@ -61,9 +61,15 @@ enum Tab {
 
 /// Which request sequence and result a row or form edits
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Part {
+pub enum Part {
     Method(MethodKind),
     Callback,
+}
+
+impl From<MethodKind> for Part {
+    fn from(value: MethodKind) -> Self {
+        Self::Method(value)
+    }
 }
 
 impl Part {
@@ -92,6 +98,13 @@ impl Part {
         match self {
             Part::Method(kind) => d.methods.get_mut(&kind).map(|m| &mut m.result),
             Part::Callback => d.callback.as_mut().map(|c| &mut c.result),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Part::Method(method_kind) => method_kind.as_str(),
+            Part::Callback => "callback",
         }
     }
 }

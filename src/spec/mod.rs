@@ -34,6 +34,9 @@ pub struct Integration {
     pub methods: BTreeMap<MethodKind, MethodDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback: Option<CallbackDef>,
+    /// List of keys that must be concealed in logs
+    #[serde(default)]
+    pub redacted_key_list: Vec<String>,
 }
 
 impl Integration {
@@ -51,7 +54,10 @@ impl Integration {
 
     /// Should we store the additional context for callback?
     pub fn stores_callback_context(&self, kind: MethodKind) -> bool {
-        matches!(kind, MethodKind::Pay | MethodKind::Payout) && self.callback().is_some()
+        matches!(
+            kind,
+            MethodKind::Pay | MethodKind::Payout | MethodKind::Refund
+        ) && self.callback().is_some()
     }
 
     /// Generate gc settings from the integration based on field usage

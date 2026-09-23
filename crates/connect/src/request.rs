@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::MethodKind;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConnectInput {
     #[serde(default)]
@@ -11,6 +13,10 @@ pub struct ConnectInput {
     pub params: Value,
     #[serde(default)]
     pub settings: Value,
+    #[serde(default)]
+    pub method_name: MethodKind,
+    #[serde(default)]
+    pub processing_url: String,
 }
 
 impl ConnectInput {

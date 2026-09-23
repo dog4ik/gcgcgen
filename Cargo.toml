@@ -46,8 +46,7 @@ sqlx = { version = "0.9.0", optional = true, default-features = false, features 
 ] }
 base64 = "0.23.1"
 connect = { path = "crates/connect" }
-# mahoraga = { path = "../mahoraga", features = ["serde_json"] }
-mahoraga = { version = "0.2.0", features = ["serde_json"] }
+mahoraga = { version = "0.3.0", features = ["serde_json"] }
 hmac = "0.13.0"
 sha2 = "0.11.0"
 md-5 = "0.11.0"
@@ -57,6 +56,7 @@ cbc = { version = "0.2.1", features = ["alloc"], optional = true }
 rand = { version = "0.10.2", optional = true }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "charset", "http2", "system-proxy"], optional = true }
 axum-extra = { version = "0.12.6", default-features = false, features = ["typed-header"], optional = true }
+dotenvy = { version = "0.15.7", optional = true }
 
 [features]
 hydrate = ["leptos/hydrate"]
@@ -76,6 +76,7 @@ ssr = [
   "dep:cbc",
   "dep:rand",
   "dep:axum-extra",
+  "dep:dotenvy",
 ]
 
 [dev-dependencies]
@@ -117,13 +118,7 @@ site-addr = "0.0.0.0:64476"
 # The port to use for automatic reload monitoring
 reload-port = 3231
 
-# [Optional] Command to use when running end2end tests. It will run in the end2end dir.
-#   [Windows] for non-WSL use "npx.cmd playwright test"
-#   This binary name can be checked in Powershell with Get-Command npx
-end2end-cmd = "npx playwright test"
-end2end-dir = "end2end"
-
-#  The browserlist query used for optimizing the CSS.
+# The browserlist query used for optimizing the CSS.
 browserquery = "defaults"
 
 # Set by cargo-leptos watch when building with that tool. Controls whether autoreload JS will be included in the head

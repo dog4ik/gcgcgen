@@ -30,6 +30,11 @@ async fn main() -> std::process::ExitCode {
         .with_ansi(!std::env::var("DISABLE_ANSII").is_ok_and(|v| v == "true"))
         .init();
 
+    match dotenvy::dotenv() {
+        Ok(path) => tracing::info!(path = %path.display(),"Successfully loaded .env file"),
+        Err(err) => tracing::warn!(%err,"Failed to loaded .env file"),
+    };
+
     let conf = get_configuration(Some("./Cargo.toml")).expect("leptos configuration");
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;

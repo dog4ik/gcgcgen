@@ -16,4 +16,5 @@ end2end/playwright-report/
 playwright/.cache/
 pnpm-lock.yaml
 
-gcgcgen.db
+/gcgcgen.db
+.env

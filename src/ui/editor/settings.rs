@@ -2,21 +2,37 @@ use super::*;
 
 #[component]
 pub fn SettingsTab(doc: RwSignal<Integration>, rev: RwSignal<u32>) -> impl IntoView {
-    let add = Callback::new(move |_| {
+    let add_setting = Callback::new(move |_| {
         doc.update(|d| d.settings.fields.push(FieldDef::new("")));
+        rev.update(|r| *r += 1);
+    });
+
+    let add_secret = Callback::new(move |_| {
+        doc.update(|d| d.redacted_key_list.push(String::new()));
         rev.update(|r| *r += 1);
     });
 
     view! {
         <Panel
             title="Settings schema"
-            subtitle="What reactivepay sends in the `settings` bucket. Credentials arrive per request and are never stored."
-            action=view! { <Button on_click=add>"Add field"</Button> }.into_any()
+            subtitle="What reactivepay sends in the `settings` object."
+            action=view! { <Button on_click=add_setting>"Add field"</Button> }.into_any()
         >
             {row_list(
                 rev,
                 move || doc.with_untracked(|d| d.settings.fields.len()),
                 move |i| view! { <SettingsRow doc rev i /> },
+            )}
+        </Panel>
+        <Panel
+            title="Secret keys"
+            subtitle="Integration specific keys that need redaction in logs"
+            action=view! { <Button on_click=add_secret>"Add field"</Button> }.into_any()
+        >
+            {row_list(
+                rev,
+                move || doc.with_untracked(|d| d.redacted_key_list.len()),
+                move |i| view! { <SecretKeyRow doc rev i /> },
             )}
         </Panel>
     }
@@ -63,6 +79,47 @@ pub fn SettingsRow(doc: RwSignal<Integration>, rev: RwSignal<u32>, i: usize) -> 
                 on_click=Callback::new(move |_| {
                     doc.update(|d| {
                         d.settings.fields.remove(i);
+                    });
+                    rev.update(|r| *r += 1);
+                })
+            >
+                "Remove"
+            </Button>
+        </div>
+    }
+}
+
+#[component]
+pub fn SecretKeyRow(doc: RwSignal<Integration>, rev: RwSignal<u32>, i: usize) -> impl IntoView {
+    // Tracked, for the `Signal::derive` bindings below.
+    let field = move || {
+        doc.get()
+            .redacted_key_list
+            .get(i)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let update = move |f: Box<dyn FnOnce(&mut String)>| {
+        doc.update(|d| {
+            if let Some(x) = d.redacted_key_list.get_mut(i) {
+                f(x)
+            }
+        })
+    };
+
+    view! {
+        <div class="grid items-end gap-3 rounded border border-slate-800 p-3 sm:grid-cols-[1fr_auto_auto]">
+            <TextField
+                label="Key"
+                value=Signal::derive(field)
+                on_input=Callback::new(move |v: String| update(Box::new(move |f| *f = v)))
+                placeholder="pan"
+            />
+            <Button
+                tone="danger"
+                on_click=Callback::new(move |_| {
+                    doc.update(|d| {
+                        d.redacted_key_list.remove(i);
                     });
                     rev.update(|r| *r += 1);
                 })

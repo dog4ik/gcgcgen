@@ -515,6 +515,21 @@ mod tests {
     }
 
     #[test]
+    fn null_and_void_literals() {
+        assert_eq!(ev("null"), Some(Value::Null));
+        assert_eq!(ev("void"), None);
+        assert_eq!(ev("payment.product == null"), Some(json!(true)));
+        assert_eq!(ev("payment.nope == void"), Some(json!(true)));
+        assert_eq!(ev("payment.token != null"), Some(json!(true)));
+        assert_eq!(
+            Expr::parse("payment.token != null && x == void")
+                .unwrap()
+                .roots(),
+            ["payment", "x"]
+        );
+    }
+
+    #[test]
     fn a_blank_builtin_result_is_absent() {
         let s = json!({ "params": { "first_name": "", "last_name": null } });
         let e = Expr::parse("[params.first_name, params.last_name] | join(' ') | trim").unwrap();

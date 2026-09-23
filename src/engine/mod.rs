@@ -79,6 +79,45 @@ pub async fn execute_method(
     }
 }
 
+#[derive(Debug)]
+struct CallbackContextData {
+    pub token: String,
+    pub amount: usize,
+    pub currency: String,
+    pub merchant_private_key: String,
+}
+
+impl CallbackContextData {
+    pub fn from_value(value: &Value) -> Option<CallbackContextData> {
+        let Some(currency) = value.get("gateway_currency").and_then(|v| v.as_str()) else {
+            tracing::warn!("invalid payment.gateway_currency; its callback cannot be matched");
+            return None;
+        };
+        let Some(token) = value.get("token").and_then(|v| v.as_str()) else {
+            tracing::warn!("invalid payment.token; its callback cannot be matched");
+            return None;
+        };
+        let Some(amount) = value.get("gateway_amount").and_then(|v| v.as_u64()) else {
+            tracing::warn!("invalid payment.gateway_amount; its callback cannot be matched");
+            return None;
+        };
+        let Some(merchant_private_key) = value
+            .get("merchant_private_key")
+            .and_then(Value::as_str)
+            .filter(|k| !k.is_empty())
+        else {
+            tracing::warn!("invalid payment.merchant_private_key; its callback cannot be matched");
+            return None;
+        };
+        Some(CallbackContextData {
+            token: token.into(),
+            amount: amount as usize,
+            currency: currency.into(),
+            merchant_private_key: merchant_private_key.into(),
+        })
+    }
+}
+
 /// Leaves what the callback will need, under both ids the gateway may echo.
 fn keep_callback_context(
     cx: &EngineCx,
@@ -86,29 +125,30 @@ fn keep_callback_context(
     input: &ConnectInput,
     transaction: &TransactionResponse,
 ) {
-    let Some(token) = input.token() else {
-        tracing::warn!(integration = %integration.key, "no payment.token; its callback cannot be matched");
-        return;
-    };
-    let Some(merchant_private_key) = input
-        .payment
-        .get("merchant_private_key")
-        .and_then(Value::as_str)
-        .filter(|k| !k.is_empty())
+    let Some(CallbackContextData {
+        token,
+        amount,
+        currency,
+        merchant_private_key,
+    }) = (match input.method_name {
+        MethodKind::Pay | MethodKind::Payout => CallbackContextData::from_value(&input.payment),
+        MethodKind::Refund => CallbackContextData::from_value(&input.refund),
+        MethodKind::Status => {
+            unreachable!("status method is not possible here")
+        }
+    })
     else {
-        tracing::warn!(
-            integration = %integration.key, %token,
-            "no payment.merchant_private_key; its callback could not be signed"
-        );
         return;
     };
-    let ids = [Some(token), transaction.gateway_token.as_deref()];
+    let ids = [Some(token.as_str()), transaction.gateway_token.as_deref()];
     cx.contexts.insert(
         &integration.key,
         ids.into_iter().flatten(),
         CallbackContext {
             token: token.to_string(),
-            merchant_private_key: merchant_private_key.to_string(),
+            gateway_amount: amount as usize,
+            gateway_currency: currency,
+            merchant_private_key,
             settings: input.settings.clone(),
         },
     );
@@ -171,7 +211,10 @@ async fn run(
     env.base_url = eval_base_url(integration, &Scope::new(input, &env, kind))?;
 
     let mut scope = Scope::new(input, &env, kind);
-    let redactor = Redactor::new(scope.secret_values(&integration.settings));
+    let redactor = Redactor::new(
+        scope.secret_values(&integration.settings),
+        integration.redacted_key_list.clone(),
+    );
 
     let halt = run_requests(
         cx,

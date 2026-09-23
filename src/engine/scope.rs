@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::spec::MethodKind;
+use crate::{engine::context::CallbackContext, spec::MethodKind};
 pub use connect::ConnectInput;
 
 /// Runtime facts injected under the `env` root.
@@ -56,13 +56,22 @@ impl Scope {
                 Value::String(method.to_string()),
             )])),
         );
+        root.insert("processing_url".into(), input.processing_url.clone().into());
         Self { root }
     }
 
-    /// A callback scope
-    pub fn for_callback(settings: &Value, callback: Value, env: &Env) -> Self {
+    pub fn env_mut(&mut self) -> &mut serde_json::Map<String, Value> {
+        self.root
+            .get_mut("env")
+            .expect("env should be always initialized")
+            .as_object_mut()
+            .expect("env must be object")
+    }
+
+    /// A callback scope, before the payment it belongs to has been found.
+    pub fn for_callback(callback: Value, env: &Env) -> Self {
         let mut root = Map::new();
-        root.insert("settings".into(), settings.clone());
+        root.insert("settings".into(), Value::Null);
         root.insert("callback".into(), callback);
         root.insert("steps".into(), Value::Object(Map::new()));
         root.insert("env".into(), env.to_value());
@@ -76,11 +85,23 @@ impl Scope {
         Self { root }
     }
 
+    /// Fills in what the matched payment's stored context knows.
+    pub fn attach_cb_context(&mut self, context: &CallbackContext) {
+        self.root
+            .insert("settings".into(), context.settings.clone());
+        self.root
+            .insert("gateway_amount".into(), context.gateway_amount.into());
+        self.root.insert(
+            "gateway_currency".into(),
+            context.gateway_currency.clone().into(),
+        );
+    }
+
     /// What a callback's `lookup` sees: the callback and `env`, nothing else.
-    pub fn for_lookup(callback: Value, env: &Env) -> Value {
+    pub fn for_lookup(&self) -> Value {
         Value::Object(Map::from_iter([
-            ("callback".to_string(), callback),
-            ("env".to_string(), env.to_value()),
+            ("callback".to_string(), self.root["callback"].clone()),
+            ("env".to_string(), self.root["env"].clone()),
         ]))
     }
 
@@ -149,6 +170,8 @@ mod tests {
             refund: json!({"token": "tok_2"}),
             params: json!({"phone": "070"}),
             settings: json!({"client_id": "cid", "client_secret": "sk_live_abcdef"}),
+            processing_url: "http://business:4000/processing".to_string(),
+            method_name: MethodKind::Pay,
         }
     }
 
@@ -190,21 +213,15 @@ mod tests {
     }
 
     #[test]
-    fn a_callback_scope_carries_only_settings_and_the_callback() {
-        let s = Scope::for_callback(
-            &json!({"client_id": "c"}),
-            json!({"body": {"rrn": "R"}}),
-            &env(),
-        );
-        let v = s.value();
-        assert_eq!(v["callback"]["body"]["rrn"], json!("R"));
-        assert_eq!(v["settings"]["client_id"], json!("c"));
-        assert_eq!(v["method"]["kind"], json!("callback"));
-        for absent in ["payment", "params", "refund"] {
-            assert!(
-                v.get(absent).is_none(),
-                "{absent} is not kept for a callback"
-            );
+    fn a_callback_scope_fills_in_as_the_payment_is_matched() {
+        let s = Scope::for_callback(json!({"body": {"rrn": "R"}}), &env());
+        assert_eq!(s.value()["settings"], json!(null));
+        assert_eq!(s.value()["method"]["kind"], json!("callback"));
+
+        let lookup = s.for_lookup();
+        assert_eq!(lookup["callback"]["body"]["rrn"], json!("R"));
+        for absent in ["settings", "steps", "method"] {
+            assert!(lookup.get(absent).is_none(), "lookup sees {absent}");
         }
     }
 

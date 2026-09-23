@@ -11,4 +11,5 @@ pub struct IntegrationSummary {
     pub updated_at: String,
     /// Methods with at least one request, in canonical order.
     pub methods: Vec<MethodKind>,
+    pub callback_defined: bool,
 }

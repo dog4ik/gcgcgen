@@ -22,7 +22,7 @@ pub fn CallbackTab(doc: RwSignal<Integration>, rev: RwSignal<u32>) -> impl IntoV
                 let n = c.requests.len() + 1;
                 c.requests.push(RequestDef::new(
                     format!("step{n}"),
-                    Expr::parse("/").expect("static expression"),
+                    Expr::parse("'/'").expect("static expression"),
                 ));
             }
         });

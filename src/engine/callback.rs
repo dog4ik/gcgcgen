@@ -5,7 +5,7 @@ use connect::{CallbackPayload, CallbackStatus, InteractionLog, Status};
 use super::context::CallbackContext;
 use super::log::{InteractionSpan, Redactor};
 use super::result::{build_response, minor_amount, opt_text, truthy};
-use super::scope::Scope;
+use super::scope::{Env, Scope};
 use super::{eval_base_url, new_env, run_requests, EngineCx, Halt, Runtime};
 use crate::spec::{CallbackDef, Integration};
 
@@ -110,22 +110,12 @@ pub async fn execute_callback(
     inbound: &InboundCallback,
     runtime: &Runtime,
 ) -> CallbackReply {
-    let callback = inbound.to_value();
-    let env = new_env(integration, &Value::Null, runtime);
-    let mut ack_scope = Scope::for_callback(&Value::Null, callback.clone(), &env);
-    let outcome = handle(
-        cx,
-        integration,
-        cb,
-        inbound,
-        &callback,
-        runtime,
-        &mut ack_scope,
-    )
-    .await;
+    let mut env = new_env(integration, &Value::Null, runtime);
+    let mut scope = Scope::for_callback(inbound.to_value(), &env);
+    let outcome = handle(cx, integration, cb, inbound, runtime, &mut env, &mut scope).await;
 
     let ack_body = cb.ack.body.as_ref().and_then(|e| {
-        e.eval(&ack_scope.value())
+        e.eval(&scope.value())
             .inspect_err(|e| tracing::warn!(integration = %integration.key, error = %e, "ack body did not evaluate"))
             .ok()
             .flatten()
@@ -137,21 +127,16 @@ pub async fn execute_callback(
     }
 }
 
-/// `scope_out` ends up as the richest scope reached, for evaluating the ack.
 async fn handle(
     cx: &EngineCx,
     integration: &Integration,
     cb: &CallbackDef,
     inbound: &InboundCallback,
-    callback: &Value,
     runtime: &Runtime,
-    scope_out: &mut Scope,
+    env: &mut Env,
+    scope: &mut Scope,
 ) -> CallbackOutcome {
-    let bare_env = new_env(integration, &Value::Null, runtime);
-    let id = match cb
-        .lookup
-        .eval_text(&Scope::for_lookup(callback.clone(), &bare_env))
-    {
+    let id = match cb.lookup.eval_text(&scope.for_lookup()) {
         Ok(id) => id,
         Err(e) => return CallbackOutcome::Failed(format!("lookup: {e}")),
     };
@@ -162,21 +147,27 @@ async fn handle(
         return CallbackOutcome::Unmatched { id };
     };
 
-    let mut env = new_env(integration, &context.settings, runtime);
-    // No requests, no base URL needed — and no reason to drop the callback.
+    scope.attach_cb_context(&context);
+    env.sandbox = truthy(context.settings.get("sandbox").unwrap_or(&Value::Null));
+    scope.env_mut().insert("sandbox".into(), env.sandbox.into());
+
     if !cb.requests.is_empty() {
-        let bootstrap = Scope::for_callback(&context.settings, callback.clone(), &env);
-        match eval_base_url(integration, &bootstrap) {
-            Ok(url) => env.base_url = url,
+        match eval_base_url(integration, scope) {
+            Ok(url) => {
+                scope
+                    .env_mut()
+                    .insert("base_url".into(), url.clone().into());
+                env.base_url = url;
+            }
             Err(e) => return CallbackOutcome::Failed(e),
         }
     }
-    let mut scope = Scope::for_callback(&context.settings, callback.clone(), &env);
     let redactor = Redactor::new(
         scope
             .secret_values(&integration.settings)
             .into_iter()
             .chain([context.merchant_private_key.clone()]),
+        integration.redacted_key_list.clone(),
     );
 
     // The callback itself opens the interaction log.
@@ -185,10 +176,7 @@ async fn handle(
     if let Some(verify) = &cb.verify {
         match verify.eval(&scope.value()) {
             Ok(Some(v)) if truthy(&v) => {}
-            Ok(_) => {
-                *scope_out = scope;
-                return CallbackOutcome::Rejected;
-            }
+            Ok(_) => return CallbackOutcome::Rejected,
             Err(e) => return CallbackOutcome::Failed(format!("verify: {e}")),
         }
     }
@@ -197,14 +185,12 @@ async fn handle(
         cx,
         integration,
         &cb.requests,
-        &env,
-        &mut scope,
+        env,
+        scope,
         &mut logs,
         &redactor,
     )
     .await;
-    let value = scope.value();
-    *scope_out = scope;
 
     let forced = match halt {
         Ok(None) => None,
@@ -218,7 +204,7 @@ async fn handle(
         Ok(Some(Halt::Declined(m))) => Some(m),
     };
 
-    match payload(cb, &value, forced, logs) {
+    match payload(cb, &scope.value(), forced, logs) {
         Ok(Some(payload)) => CallbackOutcome::Forward(forward(&context, payload)),
         Ok(None) => CallbackOutcome::Skipped {
             reason: "status is pending".into(),

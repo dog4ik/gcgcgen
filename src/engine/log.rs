@@ -56,12 +56,13 @@ impl InteractionSpan {
     }
 }
 
-/// Replaces secret settings values wherever they appear in a log entry. Logs
-/// travel to the platform and into storage. Matching is by value, which is why
-/// the settings schema has to mark fields `secret`.
+/// Replaces secret settings values wherever they appear in a log entry.
 #[derive(Debug, Clone, Default)]
 pub struct Redactor {
-    secrets: Vec<String>,
+    /// Match contents by value
+    values: Vec<String>,
+    /// Match object keys
+    keys: Vec<String>,
 }
 
 const MASK: &str = "***redacted***";
@@ -70,20 +71,26 @@ const MASK: &str = "***redacted***";
 const MIN_SECRET_LEN: usize = 6;
 
 impl Redactor {
-    pub fn new(secrets: impl IntoIterator<Item = String>) -> Self {
-        let mut secrets: Vec<String> = secrets
+    pub fn new(
+        secrets: impl IntoIterator<Item = String>,
+        keys: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let mut values: Vec<String> = secrets
             .into_iter()
             .filter(|s| s.len() >= MIN_SECRET_LEN)
             .collect();
         // Longest first, so a secret that contains another is masked whole.
-        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-        secrets.dedup();
-        Self { secrets }
+        values.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        values.dedup();
+        Self {
+            values,
+            keys: keys.into_iter().collect(),
+        }
     }
 
     pub fn redact_str(&self, s: &str) -> String {
         let mut out = s.to_string();
-        for secret in &self.secrets {
+        for secret in &self.values {
             if out.contains(secret.as_str()) {
                 out = out.replace(secret.as_str(), MASK);
             }
@@ -92,7 +99,7 @@ impl Redactor {
     }
 
     pub fn redact(&self, v: &Value) -> Value {
-        if self.secrets.is_empty() {
+        if self.values.is_empty() && self.keys.is_empty() {
             return v.clone();
         }
         match v {
@@ -101,7 +108,11 @@ impl Redactor {
             Value::Object(fields) => {
                 let mut out = Map::new();
                 for (k, val) in fields {
-                    out.insert(k.clone(), self.redact(val));
+                    if self.keys.contains(k) {
+                        out.insert(k.clone(), MASK.into());
+                    } else {
+                        out.insert(k.clone(), self.redact(val));
+                    }
                 }
                 Value::Object(out)
             }
@@ -117,7 +128,7 @@ mod tests {
 
     #[test]
     fn masks_secrets_anywhere_in_the_payload() {
-        let r = Redactor::new(["sk_live_abcdef".to_string()]);
+        let r = Redactor::new(["sk_live_abcdef".to_string()], []);
         assert_eq!(
             r.redact(&json!({"a": "sk_live_abcdef", "b": ["Bearer sk_live_abcdef"], "c": 1})),
             json!({"a": MASK, "b": [format!("Bearer {MASK}")], "c": 1})
@@ -127,7 +138,7 @@ mod tests {
     #[test]
     fn leaves_short_values_alone() {
         // Masking a two-character code would redact half the document.
-        let r = Redactor::new(["ke".to_string(), "true".to_string()]);
+        let r = Redactor::new(["ke".to_string(), "true".to_string()], []);
         assert_eq!(
             r.redact(&json!({"country": "ke"})),
             json!({"country": "ke"})
@@ -136,10 +147,13 @@ mod tests {
 
     #[test]
     fn masks_the_longest_match_first() {
-        let r = Redactor::new([
-            "secret_value".to_string(),
-            "secret_value_extended".to_string(),
-        ]);
+        let r = Redactor::new(
+            [
+                "secret_value".to_string(),
+                "secret_value_extended".to_string(),
+            ],
+            [],
+        );
         assert_eq!(r.redact_str("secret_value_extended"), MASK);
     }
 
@@ -155,11 +169,54 @@ mod tests {
         let log = span.finish(
             "scripay",
             "auth",
-            &Redactor::new(["sk_live_abcdef".to_string()]),
+            &Redactor::new(["sk_live_abcdef".to_string()], []),
         );
         assert_eq!(log.kind, "auth");
         assert_eq!(log.status, Some(200));
         assert_eq!(log.request.unwrap().params, json!({"client_secret": MASK}));
+        assert!(log.duration >= 0.0);
+    }
+
+    #[test]
+    fn object_gets_redacted() {
+        let mut span = InteractionSpan::enter();
+        span.set_request(
+            "https://x/y".into(),
+            json!({"client_secret": "sk_live_abcdef"}),
+        );
+        span.set_status(200);
+        span.set_response(json!({"ok": true}));
+        let log = span.finish(
+            "scripay",
+            "auth",
+            &Redactor::new([], ["client_secret".to_string()]),
+        );
+        assert_eq!(log.kind, "auth");
+        assert_eq!(log.status, Some(200));
+        assert_eq!(log.request.unwrap().params, json!({"client_secret": MASK}));
+        assert!(log.duration >= 0.0);
+    }
+
+    #[test]
+    fn nested_object_gets_redacted() {
+        let mut span = InteractionSpan::enter();
+        span.set_request(
+            "https://x/y".into(),
+            json!({"nested": {"client_secret": "sk_live_abcdef"}}),
+        );
+        span.set_status(200);
+        span.set_response(json!({"ok": true}));
+        let log = span.finish(
+            "scripay",
+            "auth",
+            &Redactor::new([], ["client_secret".to_string()]),
+        );
+        assert_eq!(log.kind, "auth");
+        assert_eq!(log.status, Some(200));
+        assert_eq!(
+            log.request.unwrap().params,
+            json!({"nested": { "client_secret": MASK}})
+        );
         assert!(log.duration >= 0.0);
     }
 }
