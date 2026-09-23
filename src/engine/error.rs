@@ -1,5 +1,3 @@
-//! Engine failures and the uncertainty rule.
-
 use crate::spec::EvalError;
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -22,10 +20,8 @@ pub enum EngineError {
 }
 
 impl EngineError {
-    /// Whether the gateway may have acted despite the failure — the single
-    /// most consequential rule in the engine. Uncertain means the method
-    /// reports `pending` and the platform's poller settles it; reporting
-    /// `declined` would mark a possibly-charged payment as failed.
+    /// Whether the gateway may have acted despite the failure.
+    /// Its important not to assume transaction status in case of unexpected events
     pub fn is_uncertain(&self) -> bool {
         match self {
             EngineError::Transport(_) | EngineError::Decode(_) => true,

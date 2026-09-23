@@ -1,8 +1,4 @@
 //! The builtins, declared as mahoraga functions.
-//!
-//! Every one takes its piped input as the first argument. All but `default`
-//! are wrapped in [`SkipBlank`], which is what makes absence flow through a
-//! pipeline instead of collapsing to `""`.
 
 use std::rc::Rc;
 

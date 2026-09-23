@@ -1,11 +1,4 @@
 //! Whole-document validation, run before an integration is saved.
-//!
-//! The point is to move every knowable failure from "mid-payment, in
-//! production" to "the editor refuses to save". It checks that expressions
-//! reference roots that exist *in their context*, that builtin names and
-//! arities are real, that a request only reads steps that ran before it, that
-//! auth references resolve and do not form a cycle, and that the status
-//! mapping can only produce the three canonical values.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,14 +18,16 @@ const REQUEST_ROOTS: &[&str] = &[
     "method",
     "processing_url",
 ];
-/// Roots available while interpreting a response.
+/// Roots of any response.
 const RESPONSE_ROOTS: &[&str] = &[
     "payment", "params", "refund", "settings", "steps", "env", "method", "resp",
 ];
-/// Roots available to a signature's canonical expression.
+
+/// Roots available to a signature expression.
 const SIGNATURE_ROOTS: &[&str] = &[
     "payment", "params", "settings", "steps", "env", "method", "req",
 ];
+
 /// Roots available inside a callback: the stored settings plus the inbound
 /// callback. The payment, params and refund buckets are not kept.
 const CALLBACK_ROOTS: &[&str] = &[
@@ -44,6 +39,7 @@ const CALLBACK_ROOTS: &[&str] = &[
     "gateway_amount",
     "gateway_currency",
 ];
+
 /// A callback's `lookup` runs before the stored context is found.
 const LOOKUP_ROOTS: &[&str] = &["callback", "env"];
 /// A cache key must be derivable before anything runs.

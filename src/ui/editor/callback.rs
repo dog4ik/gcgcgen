@@ -103,8 +103,7 @@ pub fn CallbackForm(doc: RwSignal<Integration>, disable: Callback<()>) -> impl I
     view! {
         <Panel
             title="callback"
-            subtitle="Received on env.callback_url. Scope: callback (method, headers, query, body, raw), \
-                      settings, steps, env."
+            subtitle="Received on env.callback_url."
             action=view! {
                 <Button tone="danger" on_click=disable>
                     "Remove callback"
@@ -131,7 +130,7 @@ pub fn CallbackForm(doc: RwSignal<Integration>, disable: Callback<()>) -> impl I
                 initial=current.verify.as_ref().map(|e| e.src().to_string()).unwrap_or_default()
                 mono=true
                 placeholder="not verified"
-                hint="Falsy rejects the callback with a 401, e.g. \
+                hint="Validate authenticity of callback, e.g. \
                       callback.headers.signature == (callback.raw | hmac_sha256(settings.secret)). \
                       Blank accepts every callback."
                 apply=Callback::new(move |v: String| {

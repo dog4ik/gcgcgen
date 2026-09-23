@@ -33,12 +33,7 @@ impl Prepared {
         if self.query.is_empty() {
             return self.url();
         }
-        let qs: Vec<String> = self
-            .query
-            .iter()
-            .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
-            .collect();
-        format!("{}?{}", self.url(), qs.join("&"))
+        format!("{}?{}", self.url(), urlencode_pairs(&self.query))
     }
 
     /// The serialized body, for signing and for `req.body_raw`.
@@ -46,11 +41,7 @@ impl Prepared {
         match &self.body {
             PreparedBody::None => String::new(),
             PreparedBody::Json(v) => serde_json::to_string(v).unwrap_or_default(),
-            PreparedBody::Form(fields) => fields
-                .iter()
-                .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
-                .collect::<Vec<_>>()
-                .join("&"),
+            PreparedBody::Form(fields) => urlencode_pairs(fields),
         }
     }
 
@@ -180,19 +171,10 @@ fn pairs(items: &[(String, String)]) -> Value {
     )
 }
 
-/// Percent-encoding for query strings and form bodies (RFC 3986 unreserved).
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+fn urlencode_pairs(pairs: &[(String, String)]) -> String {
+    form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs)
+        .finish()
 }
 
 /// Evaluates a request definition against a scope.
