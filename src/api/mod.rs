@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 use connect::{ConnectInput, ConnectResponse, MethodKind};
 
 use crate::engine::callback::{execute_callback, parse_form, CallbackOutcome, InboundCallback};
+use crate::engine::log::Redactor;
 use crate::engine::platform::send_callback;
 use crate::engine::{execute_method, Runtime};
 use crate::state::AppState;
@@ -42,7 +43,9 @@ async fn handle(
             ));
         }
     };
-    tracing::debug!(%key, %kind, body = %raw, "inbound request");
+
+    let redactor = Redactor::new([], ["pan".into(), "cvv".into()]);
+    tracing::debug!(%key, %kind, body = %&redactor.redact(&raw), "inbound request");
 
     let input: ConnectInput = match serde_json::from_value(raw) {
         Ok(v) => v,
