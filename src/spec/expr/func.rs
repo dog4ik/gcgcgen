@@ -3,7 +3,7 @@
 use std::rc::Rc;
 
 use base64::Engine as _;
-use mahoraga::value::Object;
+use mahoraga::value::{Number, Object};
 use mahoraga::{declare_fn, Args, Callable, Error, Function, Value};
 
 pub fn builtins() -> impl Iterator<Item = (&'static str, Rc<Function>)> {
@@ -187,7 +187,7 @@ impl TryFrom<Value> for Text {
 }
 
 /// A number, or a string that reads as one: gateways quote their amounts.
-struct Num(f64);
+struct Num(Number);
 
 impl TryFrom<Value> for Num {
     type Error = Error;
@@ -195,11 +195,14 @@ impl TryFrom<Value> for Num {
     fn try_from(v: Value) -> Result<Self, Error> {
         match v {
             Value::Number(n) => Ok(Num(n)),
-            Value::String(ref s) => s
-                .trim()
-                .parse()
-                .map(Num)
-                .map_err(|_| Error::new(format!("`{s}` is not a number"))),
+            Value::String(ref s) => {
+                let s = s.trim();
+                s.parse::<i64>()
+                    .map(Number::Int)
+                    .or_else(|_| s.parse::<f64>().map(Number::Float))
+                    .map(Num)
+                    .map_err(|_| Error::new(format!("`{s}` is not a number")))
+            }
             other => Err(expected("a number", &other)),
         }
     }
@@ -213,7 +216,8 @@ impl TryFrom<Value> for Count {
 
     fn try_from(v: Value) -> Result<Self, Error> {
         match Num::try_from(v)?.0 {
-            n if n >= 0.0 && n.fract() == 0.0 => Ok(Count(n as usize)),
+            Number::Int(n) if n >= 0 => Ok(Count(n as usize)),
+            Number::Float(n) if n >= 0.0 && n.fract() == 0.0 => Ok(Count(n as usize)),
             n => Err(Error::new(format!(
                 "expected a whole, non-negative number, got {n}"
             ))),
@@ -230,26 +234,39 @@ mod money {
 
     /// Fixed, because a builtin has one arity: a zero-decimal currency needs
     /// optional arguments first.
-    const EXPONENT: i32 = 2;
+    const SCALE: i64 = 100;
 
     /// Mirrors oxyscripay's `minor_to_major`: whole amounts stay integers
     /// because some gateways reject `100.0` where they accept `100`.
     pub fn minor_to_major(v: Num) -> mahoraga::Result<Value> {
-        if v.0.fract() != 0.0 {
-            return Err(Error::new(format!(
-                "minor units must be a whole number, got {}",
-                v.0
-            )));
-        }
-        Ok(Value::Number(v.0 / 10f64.powi(EXPONENT)))
+        let minor = match v.0 {
+            Number::Int(n) => n,
+            Number::Float(n) if n.fract() == 0.0 => n as i64,
+            Number::Float(n) => {
+                return Err(Error::new(format!(
+                    "minor units must be a whole number, got {n}"
+                )))
+            }
+        };
+        Ok(if minor % SCALE == 0 {
+            Value::from(minor / SCALE)
+        } else {
+            Value::from(minor as f64 / SCALE as f64)
+        })
     }
 
     pub fn major_to_minor(v: Num) -> mahoraga::Result<Value> {
-        let scaled = (v.0 * 10f64.powi(EXPONENT)).round();
-        if !scaled.is_finite() {
-            return Err(Error::new("amount is not finite"));
-        }
-        Ok(Value::Number(scaled.max(0.0)))
+        let minor = match v.0 {
+            Number::Int(n) => n.saturating_mul(SCALE),
+            Number::Float(n) => {
+                let scaled = (n * SCALE as f64).round();
+                if !scaled.is_finite() {
+                    return Err(Error::new("amount is not finite"));
+                }
+                scaled as i64
+            }
+        };
+        Ok(Value::from(minor.max(0)))
     }
 }
 
@@ -515,6 +532,8 @@ mod tests {
         assert_eq!(ev("1000 | to_string"), Some(json!("1000")));
         assert_eq!(ev("'10' | to_number"), Some(json!(10)));
         assert_eq!(ev("'42' | sha256"), ev("42 | sha256"));
+        assert_eq!(ev("10.5 | to_string"), Some(json!("10.5")));
+        assert_eq!(ev("'10.5' | to_number"), Some(json!(10.5)));
     }
 
     #[test]

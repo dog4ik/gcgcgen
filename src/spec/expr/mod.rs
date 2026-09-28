@@ -252,7 +252,7 @@ fn collect_facts(node: &mahoraga::Node, is_result: bool, out: &mut Facts) {
             collect_facts(truth_node, is_result, out);
             collect_facts(false_node, is_result, out);
         }
-        Node::Member { object, .. } => collect_facts(object, false, out),
+        Node::Member { object, .. } | Node::Negation(object) => collect_facts(object, false, out),
         Node::Index { object, index } => {
             collect_facts(object, false, out);
             collect_facts(index, false, out);
@@ -369,37 +369,13 @@ fn env() -> mahoraga::Env {
 }
 
 fn to_json(v: mahoraga::Value) -> Result<Option<Value>, EvalError> {
-    use mahoraga::value::{Array, Object};
-    Ok(Some(match v {
-        mahoraga::Value::Void => return Ok(None),
-        mahoraga::Value::Null => Value::Null,
-        mahoraga::Value::Bool(b) => Value::Bool(b),
-        mahoraga::Value::String(s) => Value::String(s),
-        mahoraga::Value::Number(n) => number(n)?,
-        mahoraga::Value::Function(f) => {
-            return Err(EvalError::new(
-                format!("`{f}` is a function, not a value"),
-                None,
-            ));
-        }
-        mahoraga::Value::Array(Array(items)) => Value::Array(
-            items
-                .into_iter()
-                .filter_map(|v| to_json(v).transpose())
-                .collect::<Result<_, _>>()?,
-        ),
-        mahoraga::Value::Object(Object(fields)) => {
-            // Hash maps: sort, or the same body renders two ways.
-            let mut fields: Vec<_> = fields.into_iter().collect();
-            fields.sort_by(|a, b| a.0.cmp(&b.0));
-            Value::Object(
-                fields
-                    .into_iter()
-                    .filter_map(|(k, v)| to_json(v).map(|v| v.map(|v| (k, v))).transpose())
-                    .collect::<Result<_, EvalError>>()?,
-            )
-        }
-    }))
+    if let mahoraga::Value::Function(f) = &v {
+        return Err(EvalError::new(
+            format!("`{f}` is a function, not a value"),
+            None,
+        ));
+    }
+    Ok(v.into_json())
 }
 
 /// Source text for a string literal. Single quotes: these sources live inside
@@ -415,18 +391,6 @@ fn quote(text: &str) -> String {
     }
     out.push('\'');
     out
-}
-
-/// mahoraga numbers are `f64`; a whole one goes back out as an integer, so an
-/// amount renders as `100` rather than `100.0`.
-fn number(n: f64) -> Result<Value, EvalError> {
-    const MAX_EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
-    if n.fract() == 0.0 && n.abs() <= MAX_EXACT {
-        return Ok(Value::from(n as i64));
-    }
-    serde_json::Number::from_f64(n)
-        .map(Value::Number)
-        .ok_or_else(|| EvalError::new(format!("`{n}` is not a finite number"), None))
 }
 
 impl fmt::Display for Expr {
@@ -527,6 +491,20 @@ mod tests {
                 .roots(),
             ["payment", "x"]
         );
+    }
+
+    #[test]
+    fn integers_and_floats_stay_apart() {
+        assert_eq!(ev("payment.gateway_amount * 2"), Some(json!(2000)));
+        assert_eq!(ev("payment.gateway_amount / 8."), Some(json!(125.0)));
+        assert_eq!(ev("payment.gateway_amount | to_f"), Some(json!(1000.0)));
+    }
+
+    #[test]
+    fn negation_reads_its_operand() {
+        assert_eq!(ev("!payment.token"), Some(json!(false)));
+        assert_eq!(ev("!payment.nope"), Some(json!(true)));
+        assert_eq!(Expr::parse("!params.phone").unwrap().roots(), ["params"]);
     }
 
     #[test]
