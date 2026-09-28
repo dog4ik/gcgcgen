@@ -108,7 +108,7 @@ impl Redactor {
             Value::Object(fields) => {
                 let mut out = Map::new();
                 for (k, val) in fields {
-                    if self.keys.contains(k) {
+                    if self.keys.contains(k) && !val.is_null() {
                         out.insert(k.clone(), MASK.into());
                     } else {
                         out.insert(k.clone(), self.redact(val));
