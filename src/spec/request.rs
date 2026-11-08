@@ -200,7 +200,7 @@ mod tests {
         )
         .unwrap();
         let e = r.response.success_when.unwrap();
-        assert_eq!(e.roots(), ["resp"]);
+        assert_eq!(e.facts().roots(), ["resp"]);
     }
 
     #[test]

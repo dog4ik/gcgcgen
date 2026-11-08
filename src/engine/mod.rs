@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn result_mapping_builds_the_transaction() {
         let m: ResultMapping = serde_json::from_str(
-            r#"{"status": "steps.c.body.state | map({\"SETTLED\":\"approved\", \"_default\":\"pending\"})",
+            r#"{"status": "{\"SETTLED\":\"approved\"}[steps.c.body.state] ?? \"pending\"",
                 "gateway_token": "steps.c.body.rrn",
                 "amount": "steps.c.body.amount | major_to_minor",
                 "currency": "steps.c.body.currency"}"#,

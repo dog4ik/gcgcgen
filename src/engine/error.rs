@@ -1,5 +1,3 @@
-use crate::spec::EvalError;
-
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum EngineError {
     /// The request never completed: DNS, connect, TLS, timeout, reset.
@@ -13,7 +11,7 @@ pub enum EngineError {
     Api { message: String, status: u16 },
     /// An expression failed while rendering or interpreting.
     #[error("{0}")]
-    Eval(#[from] EvalError),
+    Eval(String),
     /// The document is wrong in a way validation did not catch.
     #[error("{0}")]
     Config(String),
@@ -28,6 +26,12 @@ impl EngineError {
             EngineError::Api { status, .. } => *status >= 500,
             EngineError::Eval(_) | EngineError::Config(_) => false,
         }
+    }
+}
+
+impl From<mahoraga::error::Error> for EngineError {
+    fn from(e: mahoraga::error::Error) -> Self {
+        EngineError::Eval(e.to_string())
     }
 }
 

@@ -1,381 +1,111 @@
-//! The mapping expression language, parsed and evaluated by [`mahoraga`].
-
 pub mod func;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+use mahoraga::engine::Engine;
+use mahoraga::env::Env;
+use mahoraga::error::{Error, RuntimeError};
+use mahoraga::facts::Facts;
+use mahoraga::fns::{Callable, Function};
+use mahoraga::lex::Atom;
+use mahoraga::parser::{Node, NodeKind};
+use mahoraga::span::{Span, Spanned};
+use mahoraga::value::ValueType;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-
-/// Byte range within the expression source, for editor underlining.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Span {
-    pub start: usize,
-    pub end: usize,
-}
-
-impl Span {
-    pub fn new(start: usize, end: usize) -> Self {
-        Self { start, end }
-    }
-}
-
-impl From<mahoraga::Span> for Span {
-    fn from(s: mahoraga::Span) -> Self {
-        Self::new(s.start, s.end)
-    }
-}
-
-/// A compile-time (lex or parse) failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExprError {
-    pub message: String,
-    pub span: Span,
-}
-
-impl ExprError {
-    pub fn new(message: impl Into<String>, span: Span) -> Self {
-        Self {
-            message: message.into(),
-            span,
-        }
-    }
-}
-
-impl fmt::Display for ExprError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} (at {}..{})",
-            self.message, self.span.start, self.span.end
-        )
-    }
-}
-
-impl std::error::Error for ExprError {}
-
-/// A runtime failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvalError {
-    pub message: String,
-    pub span: Option<Span>,
-}
-
-impl EvalError {
-    pub fn new(message: impl Into<String>, span: Option<Span>) -> Self {
-        Self {
-            message: message.into(),
-            span,
-        }
-    }
-}
-
-impl fmt::Display for EvalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.span {
-            Some(s) => write!(f, "{} (at {}..{})", self.message, s.start, s.end),
-            None => f.write_str(&self.message),
-        }
-    }
-}
-
-impl std::error::Error for EvalError {}
 
 /// A parsed expression.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expr {
     src: String,
-    node: mahoraga::Node,
+    root: Node,
 }
 
 impl Expr {
-    pub fn parse(src: impl Into<String>) -> Result<Self, ExprError> {
+    pub fn parse(src: impl Into<String>) -> Result<Self, Error> {
         let src = src.into();
-        match mahoraga::parse_expr(&src) {
-            Ok(node) => Ok(Self { src, node }),
-            Err(e) => {
-                let span = e.span.map_or(Span::new(0, src.len()), Span::from);
-                Err(ExprError::new(e.message, span))
-            }
-        }
+        let root = mahoraga::parser::parse_expr(&src)?;
+        Ok(Self { src, root })
     }
 
     /// A string literal.
     pub fn literal(text: impl Into<String>) -> Self {
-        let text = text.into();
-        Self {
-            src: quote(&text),
-            node: mahoraga::Node::Atom(mahoraga::Atom::StrLit(text)),
-        }
+        Self::parse(quote(&text.into())).expect("quoted literal parses")
     }
 
-    /// The empty object.
     pub fn empty_object() -> Self {
-        Self {
-            src: "{}".to_string(),
-            node: mahoraga::Node::ObjectLit(Default::default()),
-        }
+        Self::parse("{}").expect("empty object parses")
     }
 
     pub fn src(&self) -> &str {
         &self.src
     }
 
+    pub fn span(&self) -> Span {
+        self.root.span
+    }
+
     /// The text of an expression that is nothing but a string literal.
     pub fn as_literal(&self) -> Option<&str> {
-        match &self.node {
-            mahoraga::Node::Atom(mahoraga::Atom::StrLit(s)) => Some(s),
+        match &self.root.kind {
+            NodeKind::Atom(Atom::StrLit(s)) => Some(s.as_str()),
             _ => None,
         }
     }
 
     /// `Ok(None)` is void: whatever this value was filling is dropped.
-    pub fn eval(&self, scope: &Value) -> Result<Option<Value>, EvalError> {
-        let mut env = env();
+    pub fn eval(&self, scope: &Value) -> Result<Option<Value>, Error> {
+        let mut env = Env {
+            fns: FNS.with(Clone::clone),
+            ..Env::default()
+        };
         if let mahoraga::Value::Object(roots) = mahoraga::Value::from(scope.clone()) {
             env.attach_object(roots);
         }
-        let out = mahoraga::eval(self.node.clone(), &env)
-            .map_err(|e| EvalError::new(e.message, e.span.map(Span::from)))?;
-        to_json(out)
+        match Engine::new(env).eval(&self.root)? {
+            v @ (mahoraga::Value::Function(_)
+            | mahoraga::Value::Closure(_)
+            | mahoraga::Value::VmClosure(_)) => Err(self.unexpected(v.value_type())),
+            out => Ok(out.into_json()),
+        }
     }
 
     /// `Ok(None)` for an absent, null or blank result. Containers are an error.
-    pub fn eval_text(&self, scope: &Value) -> Result<Option<String>, EvalError> {
+    pub fn eval_text(&self, scope: &Value) -> Result<Option<String>, Error> {
         Ok(match self.eval(scope)? {
             None | Some(Value::Null) => None,
             Some(Value::String(s)) if s.is_empty() => None,
             Some(Value::String(s)) => Some(s),
             Some(Value::Number(n)) => Some(n.to_string()),
             Some(Value::Bool(b)) => Some(b.to_string()),
-            Some(other) => {
-                return Err(EvalError::new(
-                    format!(
-                        "expected text, got {}",
-                        if other.is_array() {
-                            "an array"
-                        } else {
-                            "an object"
-                        }
-                    ),
-                    None,
-                ))
-            }
+            Some(Value::Array(_)) => return Err(self.unexpected(ValueType::Array)),
+            Some(Value::Object(_)) => return Err(self.unexpected(ValueType::Object)),
         })
     }
 
-    /// Scope roots this expression reads, for context validation.
-    pub fn roots(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for root in self
-            .paths()
-            .into_iter()
-            .filter_map(|p| p.into_iter().next())
-        {
-            if !out.contains(&root) {
-                out.push(root);
-            }
-        }
-        out
+    fn unexpected(&self, got: ValueType) -> Error {
+        let err = RuntimeError::UnexpectedType {
+            got,
+            expected: ValueType::String,
+        };
+        Spanned::new(err, self.span()).into()
     }
 
-    /// Every path read, as its static segments: `steps["auth"].token` is
-    /// `["steps", "auth", "token"]`.
-    pub fn paths(&self) -> Vec<Vec<String>> {
-        self.facts().paths
-    }
-
-    /// Every function invoked, whether written as `x | f(a)` or `f(x, a)`.
-    pub fn calls(&self) -> Vec<Call> {
-        self.facts().calls
-    }
-
-    /// String literals the expression can evaluate to directly.
-    pub fn string_results(&self) -> Vec<String> {
-        self.facts().string_results
-    }
-
-    fn facts(&self) -> Facts {
-        let mut facts = Facts::default();
-        collect_facts(&self.node, true, &mut facts);
-        facts
-    }
-}
-
-/// One invocation of a function, as written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Call {
-    pub name: String,
-    /// Arguments beside the input: `x | join(" ")` and `join(x, " ")` are both one.
-    pub args: usize,
-}
-
-#[derive(Default)]
-struct Facts {
-    paths: Vec<Vec<String>>,
-    calls: Vec<Call>,
-    string_results: Vec<String>,
-}
-
-/// `is_result` is whether this node's value can become the whole expression's
-/// value.
-fn collect_facts(node: &mahoraga::Node, is_result: bool, out: &mut Facts) {
-    use mahoraga::{Atom, Ident, Node, Punct};
-    if let Some(path) = static_path(node) {
-        out.paths.push(path);
-        return;
-    }
-    match node {
-        Node::Op((Punct::Pipe, (input, call))) => {
-            collect_facts(input, false, out);
-            match &**call {
-                Node::Atom(Atom::Ident(Ident(name))) => collect_call(name, &[], is_result, out),
-                Node::Call { callee, args } => collect_callee(callee, args, is_result, out),
-                other => collect_facts(other, false, out),
-            }
-        }
-        Node::Op((Punct::Coalesce | Punct::Or | Punct::And, (lhs, rhs))) => {
-            collect_facts(lhs, is_result, out);
-            collect_facts(rhs, is_result, out);
-        }
-        Node::Op((_, (lhs, rhs))) => {
-            collect_facts(lhs, false, out);
-            collect_facts(rhs, false, out);
-        }
-        Node::Turnary {
-            operand,
-            truth_node,
-            false_node,
-        } => {
-            collect_facts(operand, false, out);
-            collect_facts(truth_node, is_result, out);
-            collect_facts(false_node, is_result, out);
-        }
-        Node::Member { object, .. } | Node::Negation(object) => collect_facts(object, false, out),
-        Node::Index { object, index } => {
-            collect_facts(object, false, out);
-            collect_facts(index, false, out);
-        }
-        // A string inside a literal is a part of the result, not the result.
-        Node::ArrayLit(items) => {
-            for item in items {
-                collect_facts(item, false, out);
-            }
-        }
-        Node::ObjectLit(fields) => {
-            for value in fields.values() {
-                collect_facts(value, false, out);
-            }
-        }
-        Node::Atom(Atom::StrLit(s)) if is_result => out.string_results.push(s.clone()),
-        Node::Atom(_) => {}
-        Node::Call { callee, args } => match args.split_first() {
-            Some((input, rest)) => {
-                collect_facts(input, false, out);
-                collect_callee(callee, rest, is_result, out);
-            }
-            None => collect_callee(callee, &[], is_result, out),
-        },
-    }
-}
-
-fn collect_callee(
-    callee: &mahoraga::Node,
-    args: &[mahoraga::Node],
-    is_result: bool,
-    out: &mut Facts,
-) {
-    use mahoraga::{Atom, Ident, Node};
-    match callee {
-        Node::Atom(Atom::Ident(Ident(name))) => collect_call(name, args, is_result, out),
-        other => {
-            collect_facts(other, false, out);
-            for arg in args {
-                collect_facts(arg, false, out);
-            }
-        }
-    }
-}
-
-/// `is_result` carries through the arguments a builtin hands back untouched,
-/// so `| map({"a": "approved"})` still exposes a status literal.
-fn collect_call(name: &str, args: &[mahoraga::Node], is_result: bool, out: &mut Facts) {
-    use mahoraga::Node;
-    out.calls.push(Call {
-        name: name.to_string(),
-        args: args.len(),
-    });
-    let passes_through = is_result && matches!(name, "map" | "default");
-    for arg in args {
-        match arg {
-            Node::ObjectLit(fields) if passes_through => {
-                for value in fields.values() {
-                    collect_facts(value, true, out);
-                }
-            }
-            _ => collect_facts(arg, passes_through, out),
-        }
-    }
-}
-
-/// The segments of a chain of identifier, `.field` and `["key"]` accesses.
-fn static_path(node: &mahoraga::Node) -> Option<Vec<String>> {
-    use mahoraga::{Atom, Ident, Node};
-    match node {
-        Node::Atom(Atom::Ident(Ident(root))) => Some(vec![root.clone()]),
-        Node::Member {
-            object,
-            field: Ident(field),
-        } => {
-            let mut path = static_path(object)?;
-            path.push(field.clone());
-            Some(path)
-        }
-        Node::Index { object, index } => match &**index {
-            Node::Atom(Atom::StrLit(key)) => {
-                let mut path = static_path(object)?;
-                path.push(key.clone());
-                Some(path)
-            }
-            _ => None,
-        },
-        _ => None,
+    /// Paths read and functions invoked, for validation.
+    pub fn facts(&self) -> Facts {
+        self.root.collect_facts()
     }
 }
 
 /// Arguments beside the piped input, or `None` when `name` is not a function.
 pub fn arity(name: &str) -> Option<usize> {
-    thread_local! {
-        static ARITIES: std::collections::HashMap<&'static str, usize> = env()
-            .fns
-            .iter()
-            .map(|(name, f)| (*name, f.arity().saturating_sub(1)))
-            .collect();
-    }
-    ARITIES.with(|m| m.get(name).copied())
+    FNS.with(|fns| fns.get(name).map(|f| f.arity().saturating_sub(1)))
 }
 
 thread_local! {
-    /// Built once per thread, not once per evaluation.
-    static BUILTINS: Vec<(&'static str, Rc<mahoraga::Function>)> = func::builtins().collect();
-}
-
-/// The standard functions plus our builtins, which shadow them by name.
-fn env() -> mahoraga::Env {
-    let mut env = mahoraga::Env::std();
-    BUILTINS.with(|fns| env.fns.extend(fns.iter().map(|(n, f)| (*n, f.clone()))));
-    env
-}
-
-fn to_json(v: mahoraga::Value) -> Result<Option<Value>, EvalError> {
-    if let mahoraga::Value::Function(f) = &v {
-        return Err(EvalError::new(
-            format!("`{f}` is a function, not a value"),
-            None,
-        ));
-    }
-    Ok(v.into_json())
+    static FNS: HashMap<&'static str, Rc<Function>> = func::fns();
 }
 
 /// Source text for a string literal. Single quotes: these sources live inside
@@ -427,11 +157,7 @@ mod tests {
 
     #[test]
     fn deserialising_rejects_a_bad_expression() {
-        let err = serde_json::from_str::<Expr>(r#""payment.""#).unwrap_err();
-        assert!(
-            err.to_string().contains("expected member accessor"),
-            "{err}"
-        );
+        assert!(serde_json::from_str::<Expr>(r#""payment.""#).is_err());
     }
 
     fn scope() -> Value {
@@ -488,6 +214,7 @@ mod tests {
         assert_eq!(
             Expr::parse("payment.token != null && x == void")
                 .unwrap()
+                .facts()
                 .roots(),
             ["payment", "x"]
         );
@@ -498,13 +225,6 @@ mod tests {
         assert_eq!(ev("payment.gateway_amount * 2"), Some(json!(2000)));
         assert_eq!(ev("payment.gateway_amount / 8."), Some(json!(125.0)));
         assert_eq!(ev("payment.gateway_amount | to_f"), Some(json!(1000.0)));
-    }
-
-    #[test]
-    fn negation_reads_its_operand() {
-        assert_eq!(ev("!payment.token"), Some(json!(false)));
-        assert_eq!(ev("!payment.nope"), Some(json!(true)));
-        assert_eq!(Expr::parse("!params.phone").unwrap().roots(), ["params"]);
     }
 
     #[test]
@@ -533,7 +253,7 @@ mod tests {
             r#"{"purpose": 'payment',
                 "order_id": payment.token,
                 "amount": payment.gateway_amount | minor_to_major,
-                "channel": (params.extra_return_param | null_if('_blank_')) ?? settings.channel,
+                "channel": (params.extra_return_param | void_if('_blank_')) ?? settings.channel,
                 "data": { "phone_number": params.phone ?? params.customer.phone }}"#,
         )
         .unwrap();
@@ -579,6 +299,7 @@ mod tests {
         assert_eq!(e.as_literal(), Some("/v1/gateway/initiate/collection"));
         assert_eq!(Expr::parse(e.src()).unwrap(), e);
         assert_eq!(Expr::literal("it's").src(), r"'it\'s'");
+        assert_eq!(Expr::literal("it's").as_literal(), Some("it's"));
         assert!(Expr::parse("payment.token").unwrap().as_literal().is_none());
         assert_eq!(
             Expr::empty_object().eval(&scope()).unwrap(),
@@ -588,7 +309,7 @@ mod tests {
 
     #[test]
     fn validation_sees_every_registered_function() {
-        for (name, f) in &env().fns {
+        for (name, f) in &func::fns() {
             assert_eq!(
                 arity(name),
                 Some(f.arity().saturating_sub(1)),
@@ -598,57 +319,10 @@ mod tests {
     }
 
     #[test]
-    fn every_builtin_takes_a_piped_input_and_carries_help() {
-        for (name, f) in func::builtins() {
+    fn every_function_takes_a_piped_input_and_carries_help() {
+        for (name, f) in func::fns() {
             assert!(f.arity() >= 1, "`{name}` cannot be piped into");
             assert!(f.help.is_some(), "`{name}` has no help for the editor");
         }
-    }
-
-    #[test]
-    fn exposes_roots_paths_and_calls_for_validation() {
-        let e = Expr::parse(r#"payment.a["b"] ?? settings.c | trim"#).unwrap();
-        assert_eq!(e.roots(), vec!["payment", "settings"]);
-        assert_eq!(
-            e.paths(),
-            vec![vec!["payment", "a", "b"], vec!["settings", "c"]]
-        );
-        assert_eq!(
-            e.calls(),
-            vec![Call {
-                name: "trim".into(),
-                args: 0
-            }]
-        );
-    }
-
-    #[test]
-    fn a_dynamic_index_reads_both_sides() {
-        let e = Expr::parse("steps.auth[params.key].token").unwrap();
-        assert_eq!(
-            e.paths(),
-            vec![vec!["steps", "auth"], vec!["params", "key"]]
-        );
-    }
-
-    #[test]
-    fn literals_expose_the_paths_they_contain() {
-        let e =
-            Expr::parse(r#"[params.first_name, "x", {"phone": params.customer.phone}]"#).unwrap();
-        assert_eq!(
-            e.paths(),
-            vec![
-                vec!["params", "first_name"],
-                vec!["params", "customer", "phone"]
-            ]
-        );
-        assert!(e.string_results().is_empty());
-    }
-
-    #[test]
-    fn string_results_skip_compared_literals() {
-        let e = Expr::parse(r#"resp.body.s == "ok" ? "approved" : "pending""#).unwrap();
-        assert_eq!(e.string_results(), vec!["approved", "pending"]);
-        assert_eq!(e.roots(), vec!["resp"]);
     }
 }

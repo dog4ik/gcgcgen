@@ -15,7 +15,7 @@ pub use connect::{Iframe, Manifest, MethodKind, RedirectRequest, Status};
 
 pub use auth::{AuthDef, AuthId, AuthKind};
 pub use callback::{AckDef, CallbackDef};
-pub use expr::{EvalError, Expr, ExprError};
+pub use expr::Expr;
 pub use request::{Body, Envelope, HttpMethod, NameValue, OnError, RequestDef, ResponseSpec};
 pub use settings::{FieldDef, SettingsSchema};
 
@@ -87,10 +87,10 @@ impl Integration {
 
 fn first_segments(exprs: &[&Expr], root: &str) -> Vec<String> {
     let mut out = BTreeSet::new();
-    for path in exprs.iter().flat_map(|e| e.paths()) {
+    for path in exprs.iter().flat_map(|e| e.facts().paths) {
         if let [r, first, ..] = path.as_slice() {
-            if r == root {
-                out.insert(first.clone());
+            if r.name == root {
+                out.insert(first.name.clone());
             }
         }
     }
@@ -272,7 +272,11 @@ mod tests {
         // Both reach validation and the manifest through the usual walk.
         let mut exprs = Vec::new();
         r.exprs(&mut exprs);
-        let paths: Vec<Vec<String>> = exprs.iter().flat_map(|e| e.paths()).collect();
+        let paths: Vec<Vec<String>> = exprs
+            .iter()
+            .flat_map(|e| e.facts().paths)
+            .map(|p| p.into_iter().map(String::from).collect())
+            .collect();
         assert!(paths.contains(&vec![
             "steps".to_string(),
             "c".to_string(),

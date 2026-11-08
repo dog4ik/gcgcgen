@@ -79,12 +79,7 @@ pub fn NameValueGrid(
     // The row count only: reacting to the values would drop the caret.
     let count = Memo::new(move |_| state.get().len());
     let push = move |_| {
-        state.update(|r| {
-            r.push(NameValue::new(
-                "",
-                Expr::parse("").expect("empty expression"),
-            ))
-        });
+        state.update(|r| r.push(NameValue::new("", Expr::literal(""))));
         on_change.run(state.get_untracked());
         rev.update(|r| *r += 1);
     };

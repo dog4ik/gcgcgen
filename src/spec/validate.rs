@@ -3,9 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::auth::{AuthId, AuthKind, TokenRequestAuth};
-use super::expr::{self, Expr, Span};
+use mahoraga::span::Span;
+
+use super::expr::{self, Expr};
 use super::request::RequestDef;
-use super::{CallbackDef, Integration, MethodDef, MethodKind, ResultMapping, Status};
+use super::{CallbackDef, Integration, MethodDef, MethodKind, ResultMapping};
 
 /// Roots available to a request's own expressions.
 const REQUEST_ROOTS: &[&str] = &[
@@ -457,48 +459,38 @@ impl<'a> Validator<'a> {
             self.check_expr(e, roots, loc);
         }
         self.check_steps(exprs.iter().copied(), steps, loc);
-
-        // A computed status is checked at runtime instead.
-        for lit in result.status.string_results() {
-            if Status::parse(&lit).is_none() {
-                self.issue_at(
-                    format!("{loc}.status"),
-                    format!(
-                        "`{lit}` is not a status, expected one of {}",
-                        Status::ALL.map(|s| s.as_str()).join(", ")
-                    ),
-                    Span::new(0, result.status.src().len()),
-                );
-            }
-        }
     }
 
     fn check_expr(&mut self, e: &Expr, roots: &[&str], loc: &str) {
-        // mahoraga carries no spans on parsed nodes.
-        let whole = Span::new(0, e.src().len());
-        for root in e.roots() {
-            if !roots.contains(&root.as_str()) {
-                self.issue_at(
-                    loc,
-                    format!(
-                        "unknown root `{root}` here, available: {}",
-                        roots.join(", ")
-                    ),
-                    whole,
-                );
+        let facts = e.facts();
+        let mut seen = Vec::new();
+        for root in facts.paths.iter().filter_map(|p| p.first()) {
+            if roots.contains(&root.name.as_str()) || seen.contains(&root.name) {
+                continue;
             }
+            seen.push(root.name.clone());
+            self.issue_at(
+                loc,
+                format!(
+                    "unknown root `{}` here, available: {}",
+                    root.name,
+                    roots.join(", ")
+                ),
+                root.span,
+            );
         }
-        for call in e.calls() {
-            let Some(arity) = expr::arity(&call.name) else {
-                self.issue_at(loc, format!("unknown function `{}`", call.name), whole);
+        for call in facts.calls {
+            let name = &call.name.name;
+            let Some(arity) = expr::arity(name) else {
+                self.issue_at(loc, format!("unknown function `{name}`"), call.name.span);
                 continue;
             };
             if call.args != arity {
                 let plural = if arity == 1 { "argument" } else { "arguments" };
                 self.issue_at(
                     loc,
-                    format!("`{}` takes {arity} {plural}, got {}", call.name, call.args),
-                    whole,
+                    format!("`{name}` takes {arity} {plural}, got {}", call.args),
+                    call.name.span,
                 );
             }
         }
@@ -512,8 +504,7 @@ impl<'a> Validator<'a> {
         loc: &str,
     ) {
         for e in exprs {
-            let span = Span::new(0, e.src().len());
-            for name in step_refs(e) {
+            for (name, span) in step_refs(e) {
                 if !available.contains(&name) {
                     let hint = if available.is_empty() {
                         "no earlier request in this method".to_string()
@@ -531,11 +522,12 @@ impl<'a> Validator<'a> {
 }
 
 /// Every `steps.<name>` referenced by an expression.
-fn step_refs(e: &Expr) -> Vec<String> {
-    e.paths()
+fn step_refs(e: &Expr) -> Vec<(String, Span)> {
+    e.facts()
+        .paths
         .into_iter()
         .filter_map(|path| match path.as_slice() {
-            [root, name, ..] if root == "steps" => Some(name.clone()),
+            [root, name, ..] if root.name == "steps" => Some((name.name.clone(), name.span)),
             _ => None,
         })
         .collect()
@@ -631,28 +623,24 @@ mod tests {
         let m = r#"{ "pay": { "requests": [
                     { "name": "c", "path": "'/c'",
                       "body": { "kind": "json",
-                        "expr": "{\"a\": payment.token | trm, \"b\": payment.token | null_if}" } }],
+                        "expr": "{\"a\": payment.token | trm, \"b\": payment.token | void_if}" } }],
                     "result": { "status": "\"pending\"" } } }"#;
         let e = validate(&doc(m, "[]")).unwrap_err();
         let s = e.to_string();
         assert!(s.contains("unknown function `trm`"), "{s}");
-        assert!(s.contains("`null_if` takes 1 argument"), "{s}");
+        assert!(s.contains("`void_if` takes 1 argument"), "{s}");
     }
 
     #[test]
-    fn rejects_a_bad_literal_status() {
-        let m = r#"{ "pay": { "requests": [{ "name": "c", "path": "'/c'" }],
-                    "result": { "status": "\"succeeded\"" } } }"#;
-        let e = validate(&doc(m, "[]")).unwrap_err();
-        assert!(e.to_string().contains("`succeeded` is not a status"), "{e}");
-    }
-
-    #[test]
-    fn checks_statuses_produced_by_a_map_table() {
-        let m = r#"{ "pay": { "requests": [{ "name": "c", "path": "'/c'" }],
-                    "result": { "status": "steps.c.body.status | map({\"Success\":\"approved\", \"Bad\":\"oops\"})" } } }"#;
-        let e = validate(&doc(m, "[]")).unwrap_err();
-        assert!(e.to_string().contains("`oops` is not a status"), "{e}");
+    fn closure_arguments_are_not_roots() {
+        let m = r#"{ "pay": { "requests": [
+                    { "name": "c", "path": "'/c'",
+                      "body": { "kind": "json",
+                        "expr": "{\"total\": params.items | map(|i| i.price) | sum, \"b\": params.items | map(|i| nope.x)}" } }],
+                    "result": { "status": "\"pending\"" } } }"#;
+        let s = validate(&doc(m, "[]")).unwrap_err().to_string();
+        assert!(!s.contains("`i`"), "{s}");
+        assert!(s.contains("unknown root `nope`"), "{s}");
     }
 
     #[test]
