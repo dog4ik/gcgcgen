@@ -337,9 +337,7 @@ impl<'a> Validator<'a> {
                     ),
                 );
             }
-            if !available.insert(req.name.clone()) {
-                self.issue(&loc, format!("duplicate request name `{}`", req.name));
-            }
+            available.insert(req.name.clone());
             let mut earlier = available.clone();
             earlier.remove(&req.name);
             self.check_request(req, roots, &loc, &earlier);
