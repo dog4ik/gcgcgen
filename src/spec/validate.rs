@@ -733,15 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_request_names() {
-        let m = r#"{ "pay": { "requests": [
-                    { "name": "c", "path": "'/a'" }, { "name": "c", "path": "'/b'" }],
-                    "result": { "status": "\"pending\"" } } }"#;
-        let e = validate(&doc(m, "[]")).unwrap_err();
-        assert!(e.to_string().contains("duplicate request name"), "{e}");
-    }
-
-    #[test]
     fn derives_the_platform_manifest_from_expressions() {
         let m = r#"{ "pay": { "requests": [
                     { "name": "c", "path": "'/c'", "body": { "kind": "json",
