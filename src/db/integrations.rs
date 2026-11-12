@@ -234,8 +234,7 @@ mod tests {
     async fn an_invalid_document_is_never_stored(pool: SqlitePool) {
         let repo = Repo::new(pool.clone());
         let mut bad = doc("a");
-        bad.methods.get_mut(&MethodKind::Pay).unwrap().requests[0].path =
-            crate::spec::Expr::literal("https://elsewhere.example/x");
+        bad.base_url = crate::spec::Expr::literal("elsewhere.example");
 
         let err = repo.save(&bad).await.unwrap_err();
         assert!(matches!(err, RepoError::Invalid(_)), "{err}");

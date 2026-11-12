@@ -202,14 +202,27 @@ pub fn prepare(req: &RequestDef, base_url: &str, scope: &Value) -> Result<Prepar
         },
     };
 
+    let (base_url, path) = match split_absolute(&path) {
+        Some((origin, rest)) => (origin.to_string(), rest.to_string()),
+        None => (base_url.trim_end_matches('/').to_string(), path),
+    };
+
     Ok(Prepared {
         method: req.method,
         path,
-        base_url: base_url.trim_end_matches('/').to_string(),
+        base_url,
         query: Vec::new(),
         headers,
         body,
     })
+}
+
+fn split_absolute(url: &str) -> Option<(&str, &str)> {
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let at = url.len() - after_scheme.len() + after_scheme.find('/').unwrap_or(after_scheme.len());
+    Some(url.split_at(at))
 }
 
 /// Flattens an evaluated JSON body into form pairs: nested objects become
@@ -351,6 +364,19 @@ mod tests {
         assert_eq!(p.body, PreparedBody::Json(json!({"amount": 10})));
         assert_eq!(p.full_url(), "https://api.example.com/v1/pay/tok 1");
         assert_eq!(p.body_raw(), r#"{"amount":10}"#);
+    }
+
+    #[test]
+    fn an_absolute_path_replaces_base_url() {
+        let r = req(r#"{"name": "c", "path": "'https://vault.example/v1/cards/'"}"#);
+        let p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        assert_eq!(p.base_url, "https://vault.example");
+        assert_eq!(p.path, "/v1/cards/");
+        assert_eq!(p.full_url(), "https://vault.example/v1/cards/");
+
+        let r = req(r#"{"name": "c", "path": "'http://vault.example'"}"#);
+        let p = prepare(&r, "https://api.example.com", &scope()).unwrap();
+        assert_eq!(p.full_url(), "http://vault.example");
     }
 
     #[test]

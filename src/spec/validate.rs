@@ -419,13 +419,6 @@ impl<'a> Validator<'a> {
                 self.issue(loc, format!("unknown auth `{id}`"));
             }
         }
-        if req
-            .path
-            .as_literal()
-            .is_some_and(|p| p.starts_with("http://") || p.starts_with("https://"))
-        {
-            self.issue(loc, "path is appended to base_url; it must not be absolute");
-        }
         for e in req.exprs() {
             self.check_expr(e, roots, loc);
             self.check_steps([e], earlier_steps, loc);
@@ -721,15 +714,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_absolute_request_path_and_a_bad_base_url() {
+    fn rejects_a_bad_base_url() {
         let mut d = doc(&simple_method(""), "[]");
         d.base_url = Expr::literal("api.example.com/");
-        d.methods.get_mut(&MethodKind::Pay).unwrap().requests[0].path =
-            Expr::literal("https://evil.example/x");
         let e = validate(&d).unwrap_err();
-        let s = e.to_string();
-        assert!(s.contains("`http://`"), "{s}");
-        assert!(s.contains("must not be absolute"), "{s}");
+        assert!(e.to_string().contains("`http://`"), "{e}");
+    }
+
+    #[test]
+    fn accepts_an_absolute_request_path() {
+        let mut d = doc(&simple_method(""), "[]");
+        d.methods.get_mut(&MethodKind::Pay).unwrap().requests[0].path =
+            Expr::literal("https://vault.example/v1/cards/");
+        validate(&d).unwrap();
     }
 
     #[test]
